@@ -172,17 +172,6 @@ class ScheduleNotifier:
         if notification_count == 0 and result['changed'] and users:
             logger.info("Overall schedule changed but no group-specific changes detected")
             logger.info("This might be a new schedule format or date change")
-            # Optionally send a generic notification
-            # Uncommented this to avoid spamming users with generic messages
-            # message = (
-            #     "⚡️ <b>Оновлення графіку відключень!</b>
-
-            #     "Графік відключень було оновлено.
-            #     "Перевірте актуальну інформацію на сайті: https://poweron.loe.lviv.ua/"
-            # )
-            # for user_id in users.keys():
-            #     await self.send_notification(user_id, message)
-            #     await asyncio.sleep(0.5)
 
 
 async def main():
