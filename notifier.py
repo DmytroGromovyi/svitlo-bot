@@ -56,7 +56,7 @@ class ScheduleNotifier:
     
     def format_change_message(self, group_id, old_data, new_data):
         """Format a message about schedule changes"""
-        message = f"⚡️ <b>Зміна графіку відключень!</b>
+        message = "<b>Зміна графіку відключень!</b>
 
 "
         message += f"Група: <b>{group_id}</b>
@@ -64,30 +64,27 @@ class ScheduleNotifier:
 "
         
         if new_data and len(new_data) > 0:
-            latest_schedule = new_data[0]  # Get the most recent entry
+            latest_schedule = new_data[0]
             
-            # Add date/timestamp if available
             schedule_date = latest_schedule.get('date', '')
             if schedule_date:
-                message += f"📅 <b>{schedule_date}</b>
+                message += f"<b>{schedule_date}</b>
 
 "
             
-            # Add the actual schedule
             schedule_text = latest_schedule.get('schedule', '')
             if schedule_text:
-                # Clean up the text
-                schedule_text = schedule_text.replace('Електроенергії немає з', '🔴 Немає світла:')
+                schedule_text = schedule_text.replace('Електроенергії немає з', 'Немає світла:')
                 schedule_text = schedule_text.strip()
-                message += f"📋 {schedule_text}
+                message += f"{schedule_text}
 "
             else:
-                message += "📋 <b>Опубліковано новий графік</b>
+                message += "<b>Опубліковано новий графік</b>
 "
                 message += "Деталі доступні на сайті: https://poweron.loe.lviv.ua/
 "
         else:
-            message += "📋 <b>Опубліковано новий графік</b>
+            message += "<b>Опубліковано новий графік</b>
 "
             message += "Перевірте деталі на сайті: https://poweron.loe.lviv.ua/
 "
@@ -98,7 +95,6 @@ class ScheduleNotifier:
         """Extract a brief summary from schedule data"""
         if isinstance(schedule_data, dict):
             content = schedule_data.get('content', '')
-            # Return first 200 characters
             if content:
                 return content[:200] + "..." if len(content) > 200 else content
         return "Деталі доступні на сайті"
@@ -107,7 +103,6 @@ class ScheduleNotifier:
         """Check for schedule changes and notify users"""
         logger.info("Starting schedule check...")
         
-        # Check for changes
         result = self.scraper.check_for_changes()
         
         if not result:
@@ -120,18 +115,15 @@ class ScheduleNotifier:
         
         logger.info("Changes detected! Preparing notifications...")
         
-        # Load users from file (fetched by GitHub Actions)
         users = self.load_users_from_file('users.json')
         
         if not users:
             logger.info("No users registered, skipping notifications")
             return
         
-        # Get new schedule
         new_schedule = result['new_schedule']
         old_schedule = result['old_schedule']
         
-        # Group users by their selected group
         users_by_group = {}
         for user_id, user_data in users.items():
             group = user_data.get('group')
@@ -140,19 +132,15 @@ class ScheduleNotifier:
                     users_by_group[group] = []
                 users_by_group[group].append(user_id)
         
-        # Send notifications
         notification_count = 0
         
-        # Check which groups have changed
         new_groups = new_schedule.get('groups', {})
         old_groups = old_schedule.get('groups', {}) if old_schedule else {}
         
         for group_id, user_ids in users_by_group.items():
-            # Get schedule for this group
             new_group_data = new_groups.get(group_id)
             old_group_data = old_groups.get(group_id)
             
-            # Check if this specific group's schedule changed
             if new_group_data != old_group_data:
                 logger.info(f"Group {group_id} schedule changed, notifying {len(user_ids)} users")
                 message = self.format_change_message(group_id, old_group_data, new_group_data)
@@ -161,14 +149,12 @@ class ScheduleNotifier:
                     success = await self.send_notification(user_id, message)
                     if success:
                         notification_count += 1
-                    # Small delay to avoid rate limiting
                     await asyncio.sleep(0.5)
             else:
                 logger.info(f"Group {group_id} schedule unchanged, skipping notifications")
         
         logger.info(f"Notifications sent: {notification_count}")
         
-        # If overall schedule changed but no specific groups matched, notify all users
         if notification_count == 0 and result['changed'] and users:
             logger.info("Overall schedule changed but no group-specific changes detected")
             logger.info("This might be a new schedule format or date change")
