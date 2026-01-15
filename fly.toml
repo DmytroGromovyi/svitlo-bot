@@ -14,7 +14,18 @@ app = 'svitlo-bot-wandering-voice-5007'
   min_machines_running = 1
   processes = ['app']
 
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
 [[vm]]
   memory = '256mb'
   cpu_kind = 'shared'
   cpus = 1
+
+[mounts]
+  source = "svitlo_data"
+  destination = "/data"

@@ -1,8 +1,11 @@
 import os
 import json
 import logging
+import sqlite3
+import threading
 import subprocess
 from dotenv import load_dotenv
+from flask import Flask, jsonify, request
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -15,6 +18,52 @@ from telegram.ext import (
 
 # Load environment variables from .env file
 load_dotenv()
+
+app = Flask(__name__)
+
+# API endpoint to fetch users
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    # Check authorization
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {os.environ.get('API_SECRET')}":
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    # Query SQLite database
+    conn = sqlite3.connect('/data/users.db')
+    cursor = conn.execute('SELECT user_id, group_id FROM users')
+    users = [{'user_id': row[0], 'group_id': row[1]} for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({'users': users})
+
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
+
+def run_flask():
+    # Fly.io binds to port 8080 by default
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def run_bot():
+    # Your existing bot code
+    application = Application.builder().token(os.environ['BOT_TOKEN']).build()
+    # Add your handlers here
+    application.run_polling()
+
+def init_database():
+    conn = sqlite3.connect('/data/users.db')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            group_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -267,11 +316,17 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
+    init_database()
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
     import asyncio
     # Ensure event loop exists for Python 3.14+
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+        # Run Flask in a separate thread
     
     main()
