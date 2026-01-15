@@ -8,6 +8,7 @@ from telegram.error import TelegramError
 from scraper import ScheduleScraper
 
 
+# Load environment variables from .env file
 load_dotenv()
 
 
@@ -21,11 +22,13 @@ class ScheduleNotifier:
         self.scraper = ScheduleScraper()
     
     def load_users_from_file(self, filepath='users.json'):
+        """Load users from the JSON file fetched by GitHub Actions"""
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 users_list = data.get('users', [])
                 
+                # Convert to dict format: {user_id: {'group': group_id}}
                 users_dict = {}
                 for user in users_list:
                     user_id = str(user.get('user_id'))
@@ -42,6 +45,7 @@ class ScheduleNotifier:
             return {}
     
     async def send_notification(self, user_id, message):
+        """Send notification to a specific user"""
         try:
             await self.bot.send_message(chat_id=user_id, text=message, parse_mode='HTML')
             logger.info(f"Notification sent to user {user_id}")
@@ -51,40 +55,48 @@ class ScheduleNotifier:
             return False
     
     def format_change_message(self, group_id, old_data, new_data):
-        message = "Schedule change for group " + str(group_id) + "
-
-"
+        """Format a message about schedule changes"""
+        message = "⚡️ <b>Зміна графіку відключень!</b>\n\n"
+        message += f"Група: <b>{group_id}</b>\n\n"
         
         if new_data and len(new_data) > 0:
-            latest_schedule = new_data[0]
+            latest_schedule = new_data[0]  # Get the most recent entry
             
+            # Add date/timestamp if available
             schedule_date = latest_schedule.get('date', '')
             if schedule_date:
-                message += "Date: " + schedule_date + "
-
-"
+                message += f"📅 <b>{schedule_date}</b>\n\n"
             
+            # Add the actual schedule
             schedule_text = latest_schedule.get('schedule', '')
             if schedule_text:
+                # Clean up the text
+                schedule_text = schedule_text.replace('Електроенергії немає з', '🔴 Немає світла:')
                 schedule_text = schedule_text.strip()
-                message += schedule_text + "
-"
+                message += f"📋 {schedule_text}\n"
             else:
-                message += "New schedule published
-"
-                message += "Details: https://poweron.loe.lviv.ua/
-"
+                message += "📋 <b>Опубліковано новий графік</b>\n"
+                message += "Деталі доступні на сайті: https://poweron.loe.lviv.ua/\n"
         else:
-            message += "New schedule published
-"
-            message += "Details: https://poweron.loe.lviv.ua/
-"
+            message += "📋 <b>Опубліковано новий графік</b>\n"
+            message += "Перевірте деталі на сайті: https://poweron.loe.lviv.ua/\n"
         
         return message
     
+    def _extract_schedule_summary(self, schedule_data):
+        """Extract a brief summary from schedule data"""
+        if isinstance(schedule_data, dict):
+            content = schedule_data.get('content', '')
+            # Return first 200 characters
+            if content:
+                return content[:200] + "..." if len(content) > 200 else content
+        return "Деталі доступні на сайті"
+    
     async def check_and_notify(self):
+        """Check for schedule changes and notify users"""
         logger.info("Starting schedule check...")
         
+        # Check for changes
         result = self.scraper.check_for_changes()
         
         if not result:
@@ -97,15 +109,18 @@ class ScheduleNotifier:
         
         logger.info("Changes detected! Preparing notifications...")
         
+        # Load users from file (fetched by GitHub Actions)
         users = self.load_users_from_file('users.json')
         
         if not users:
             logger.info("No users registered, skipping notifications")
             return
         
+        # Get new schedule
         new_schedule = result['new_schedule']
         old_schedule = result['old_schedule']
         
+        # Group users by their selected group
         users_by_group = {}
         for user_id, user_data in users.items():
             group = user_data.get('group')
@@ -114,15 +129,19 @@ class ScheduleNotifier:
                     users_by_group[group] = []
                 users_by_group[group].append(user_id)
         
+        # Send notifications
         notification_count = 0
         
+        # Check which groups have changed
         new_groups = new_schedule.get('groups', {})
         old_groups = old_schedule.get('groups', {}) if old_schedule else {}
         
         for group_id, user_ids in users_by_group.items():
+            # Get schedule for this group
             new_group_data = new_groups.get(group_id)
             old_group_data = old_groups.get(group_id)
             
+            # Check if this specific group's schedule changed
             if new_group_data != old_group_data:
                 logger.info(f"Group {group_id} schedule changed, notifying {len(user_ids)} users")
                 message = self.format_change_message(group_id, old_group_data, new_group_data)
@@ -131,14 +150,21 @@ class ScheduleNotifier:
                     success = await self.send_notification(user_id, message)
                     if success:
                         notification_count += 1
+                    # Small delay to avoid rate limiting
                     await asyncio.sleep(0.5)
             else:
                 logger.info(f"Group {group_id} schedule unchanged, skipping notifications")
         
         logger.info(f"Notifications sent: {notification_count}")
+        
+        # If overall schedule changed but no specific groups matched, notify all users
+        if notification_count == 0 and result['changed'] and users:
+            logger.info("Overall schedule changed but no group-specific changes detected")
+            logger.info("This might be a new schedule format or date change")
 
 
 async def main():
+    """Main function for cron job"""
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
