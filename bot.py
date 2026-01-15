@@ -1,11 +1,9 @@
 import os
 import json
 import logging
+import subprocess
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-
-# Load environment variables from .env file
-load_dotenv()
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,32 +13,68 @@ from telegram.ext import (
     filters
 )
 
+# Load environment variables from .env file
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Conversation states
 SELECTING_GROUP = 1
 
-# Whitelist of allowed user IDs (optional)
-WHITELIST = os.getenv('ALLOWED_USER_IDS', '').split(',')
-WHITELIST = [int(uid.strip()) for uid in WHITELIST if uid.strip().isdigit()]
+# Maximum number of users allowed
+MAX_USERS = 15
 
 class UserStorage:
-    def __init__(self, filepath='data/users.json'):
+    def __init__(self, filepath='data/users.json', repo_path='.'):
         self.filepath = filepath
+        self.repo_path = repo_path
+        self.git_enabled = os.getenv('GIT_SYNC_ENABLED', 'false').lower() == 'true'
         self.users = self._load()
     
     def _load(self):
         try:
+            # Pull latest from git if enabled
+            if self.git_enabled:
+                self._git_pull()
+            
             with open(self.filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
     
+    def _git_pull(self):
+        """Pull latest changes from git"""
+        try:
+            subprocess.run(['git', 'pull'], cwd=self.repo_path, check=True, capture_output=True)
+            logger.info("✓ Pulled latest data from git")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Git pull failed: {e}")
+        except FileNotFoundError:
+            logger.warning("Git not available in container")
+    
+    def _git_commit_push(self, message):
+        """Commit and push changes to git"""
+        if not self.git_enabled:
+            return
+        
+        try:
+            subprocess.run(['git', 'add', self.filepath], cwd=self.repo_path, check=True)
+            subprocess.run(['git', 'commit', '-m', message], cwd=self.repo_path, check=True)
+            subprocess.run(['git', 'push'], cwd=self.repo_path, check=True)
+            logger.info(f"✓ Pushed changes to git: {message}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Git commit/push failed: {e}")
+        except FileNotFoundError:
+            logger.warning("Git not available in container")
+    
     def save(self):
         os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
         with open(self.filepath, 'w', encoding='utf-8') as f:
             json.dump(self.users, f, ensure_ascii=False, indent=2)
+        
+        # Commit to git if enabled
+        self._git_commit_push("Update user data")
     
     def get_user(self, user_id):
         return self.users.get(str(user_id))
@@ -59,20 +93,13 @@ class UserStorage:
 
 storage = UserStorage()
 
-def check_whitelist(user_id):
-    """Check if user is whitelisted (if whitelist is enabled)"""
-    if not WHITELIST:
-        return True
-    return user_id in WHITELIST
+def check_user_limit():
+    """Check if user limit has been reached"""
+    current_users = len(storage.get_all_users())
+    return current_users < MAX_USERS
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not check_whitelist(user_id):
-        await update.message.reply_text(
-            "Вибачте, цей бот доступний лише для авторизованих користувачів."
-        )
-        return ConversationHandler.END
     
     user_data = storage.get_user(user_id)
     
@@ -99,8 +126,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if not check_whitelist(user_id):
-        await update.message.reply_text("Доступ заборонено.")
+    # Check if user exists or if we can add new users
+    user_data = storage.get_user(user_id)
+    
+    if not user_data and not check_user_limit():
+        await update.message.reply_text(
+            "Вибачте, бот досяг максимальної кількості користувачів (15).\n"
+            "Зверніться до адміністратора для збільшення ліміту."
+        )
         return ConversationHandler.END
     
     # Available groups
@@ -182,13 +215,15 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current_users = len(storage.get_all_users())
     await update.message.reply_text(
         "📋 Доступні команди:\n\n"
-        "/start - Почати роботу зботом\n"
+        "/start - Почати роботу з ботом\n"
         "/setgroup - Встановити/змінити групу відключень\n"
         "/mygroup - Показати поточну групу\n"
         "/stop - Відписатися від сповіщень\n"
-        "/help - Показати цю допомогу"
+        "/help - Показати цю допомогу\n\n"
+        f"👥 Користувачів: {current_users}/{MAX_USERS}"
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1,0 +1,28 @@
+# flyctl launch added from .gitignore
+# Python
+**\__pycache__
+**\*.py[cod]
+**\*$py.class
+**\*.so
+**\.Python
+**\venv
+**\ENV
+
+# Environment
+**\.env
+**\.env.local
+
+# OS
+**\.DS_Store
+
+# Logs
+**\*.log
+
+# Debug files (optional - you might want to track these)
+**\data\last_fetch.json
+**\data\last_fetch.html
+
+# flyctl launch added from venv\.gitignore
+# Created by venv; see https://docs.python.org/3/library/venv.html
+venv\**\*
+fly.toml
