@@ -1,23 +1,48 @@
 import os
+import json
 import logging
 import asyncio
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.error import TelegramError
 from scraper import ScheduleScraper
-from bot import UserStorage
+
 
 # Load environment variables from .env file
 load_dotenv()
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class ScheduleNotifier:
     def __init__(self, bot_token):
         self.bot = Bot(token=bot_token)
         self.scraper = ScheduleScraper()
-        self.user_storage = UserStorage()
+    
+    def load_users_from_file(self, filepath='users.json'):
+        """Load users from the JSON file fetched by GitHub Actions"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                users_list = data.get('users', [])
+                
+                # Convert to dict format: {user_id: {'group': group_id}}
+                users_dict = {}
+                for user in users_list:
+                    user_id = str(user.get('user_id'))
+                    group_id = user.get('group_id')
+                    users_dict[user_id] = {'group': group_id}
+                
+                logger.info(f"Loaded {len(users_dict)} users from {filepath}")
+                return users_dict
+        except FileNotFoundError:
+            logger.error(f"File {filepath} not found")
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading users: {e}")
+            return {}
     
     async def send_notification(self, user_id, message):
         """Send notification to a specific user"""
@@ -31,8 +56,12 @@ class ScheduleNotifier:
     
     def format_change_message(self, group_id, old_data, new_data):
         """Format a message about schedule changes"""
-        message = f"⚡️ <b>Зміна графіку відключень!</b>\n\n"
-        message += f"Група: <b>{group_id}</b>\n\n"
+        message = f"⚡️ <b>Зміна графіку відключень!</b>
+
+"
+        message += f"Група: <b>{group_id}</b>
+
+"
         
         if new_data and len(new_data) > 0:
             latest_schedule = new_data[0]  # Get the most recent entry
@@ -40,7 +69,9 @@ class ScheduleNotifier:
             # Add date/timestamp if available
             schedule_date = latest_schedule.get('date', '')
             if schedule_date:
-                message += f"📅 <b>{schedule_date}</b>\n\n"
+                message += f"📅 <b>{schedule_date}</b>
+
+"
             
             # Add the actual schedule
             schedule_text = latest_schedule.get('schedule', '')
@@ -48,13 +79,18 @@ class ScheduleNotifier:
                 # Clean up the text
                 schedule_text = schedule_text.replace('Електроенергії немає з', '🔴 Немає світла:')
                 schedule_text = schedule_text.strip()
-                message += f"📋 {schedule_text}\n"
+                message += f"📋 {schedule_text}
+"
             else:
-                message += "📋 <b>Опубліковано новий графік</b>\n"
-                message += "Деталі доступні на сайті: https://poweron.loe.lviv.ua/\n"
+                message += "📋 <b>Опубліковано новий графік</b>
+"
+                message += "Деталі доступні на сайті: https://poweron.loe.lviv.ua/
+"
         else:
-            message += "📋 <b>Опубліковано новий графік</b>\n"
-            message += "Перевірте деталі на сайті: https://poweron.loe.lviv.ua/\n"
+            message += "📋 <b>Опубліковано новий графік</b>
+"
+            message += "Перевірте деталі на сайті: https://poweron.loe.lviv.ua/
+"
         
         return message
     
@@ -84,8 +120,8 @@ class ScheduleNotifier:
         
         logger.info("Changes detected! Preparing notifications...")
         
-        # Get all users
-        users = self.user_storage.get_all_users()
+        # Load users from file (fetched by GitHub Actions)
+        users = self.load_users_from_file('users.json')
         
         if not users:
             logger.info("No users registered, skipping notifications")
@@ -139,13 +175,17 @@ class ScheduleNotifier:
             # Optionally send a generic notification
             # Uncommented this to avoid spamming users with generic messages
             # message = (
-            #     "⚡️ <b>Оновлення графіку відключень!</b>\n\n"
-            #     "Графік відключень було оновлено.\n"
+            #     "⚡️ <b>Оновлення графіку відключень!</b>
+
+"
+            #     "Графік відключень було оновлено.
+"
             #     "Перевірте актуальну інформацію на сайті: https://poweron.loe.lviv.ua/"
             # )
             # for user_id in users.keys():
             #     await self.send_notification(user_id, message)
             #     await asyncio.sleep(0.5)
+
 
 async def main():
     """Main function for cron job"""
@@ -157,6 +197,7 @@ async def main():
     notifier = ScheduleNotifier(bot_token)
     await notifier.check_and_notify()
     logger.info("Schedule check completed")
+
 
 if __name__ == '__main__':
     asyncio.run(main())
