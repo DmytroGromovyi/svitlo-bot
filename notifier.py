@@ -177,9 +177,7 @@ class ScheduleNotifier:
             # message = (
             #     "⚡️ <b>Оновлення графіку відключень!</b>
 
-"
             #     "Графік відключень було оновлено.
-"
             #     "Перевірте актуальну інформацію на сайті: https://poweron.loe.lviv.ua/"
             # )
             # for user_id in users.keys():
