@@ -33,7 +33,7 @@ jobs:
     - name: Fetch user data from bot
       run: |
         curl -f -H "Authorization: Bearer ${{ secrets.BOT_API_SECRET }}" \
-        https://svitlo-bot-wandering-voice-5007.fly.dev/api/users -o /data/users.json
+        https://svitlo-bot-wandering-voice-5007.fly.dev/api/users -o users.json
     
     - name: Check for schedule changes and notify
       env:
