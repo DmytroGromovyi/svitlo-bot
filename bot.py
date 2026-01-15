@@ -2,7 +2,6 @@ import os
 import logging
 import sqlite3
 import threading
-from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -40,16 +39,16 @@ class UserStorage:
     
     def _init_database(self):
         """Initialize the database and create tables if they don't exist"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+        
         conn = sqlite3.connect(self.db_path)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 group_id TEXT NOT NULL,
-                username TEXT,
-                first_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         conn.commit()
@@ -64,7 +63,7 @@ class UserStorage:
         """Get user data by user_id"""
         conn = self._get_connection()
         cursor = conn.execute(
-            'SELECT user_id, group_id, username, first_name FROM users WHERE user_id = ?',
+            'SELECT user_id, group_id FROM users WHERE user_id = ?',
             (user_id,)
         )
         row = cursor.fetchone()
@@ -73,9 +72,7 @@ class UserStorage:
         if row:
             return {
                 'user_id': row[0],
-                'group': row[1],
-                'username': row[2],
-                'first_name': row[3]
+                'group': row[1]
             }
         return None
     
@@ -85,14 +82,11 @@ class UserStorage:
         
         # Use INSERT OR REPLACE to handle both insert and update
         conn.execute('''
-            INSERT OR REPLACE INTO users (user_id, group_id, username, first_name, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO users (user_id, group_id)
+            VALUES (?, ?)
         ''', (
             user_id,
-            data.get('group'),
-            data.get('username'),
-            data.get('first_name'),
-            datetime.now()
+            data.get('group')
         ))
         
         conn.commit()
@@ -102,15 +96,13 @@ class UserStorage:
     def get_all_users(self):
         """Get all users as a dictionary"""
         conn = self._get_connection()
-        cursor = conn.execute('SELECT user_id, group_id, username, first_name FROM users')
+        cursor = conn.execute('SELECT user_id, group_id FROM users')
         
         users = {}
         for row in cursor.fetchall():
             users[str(row[0])] = {
                 'user_id': row[0],
-                'group': row[1],
-                'username': row[2],
-                'first_name': row[3]
+                'group': row[1]
             }
         
         conn.close()
@@ -165,7 +157,7 @@ def health():
 def run_flask():
     """Run Flask server"""
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
 
 
 def check_user_limit():
@@ -257,9 +249,7 @@ async def group_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_data = {
         'group': group,
-        'user_id': user_id,
-        'username': update.effective_user.username,
-        'first_name': update.effective_user.first_name
+        'user_id': user_id
     }
     
     storage.set_user(user_id, user_data)
