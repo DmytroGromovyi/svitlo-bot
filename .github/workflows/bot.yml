@@ -21,6 +21,11 @@ jobs:
       with:
         python-version: '3.11'
         cache: 'pip'
+
+    - name: Fetch user data from bot
+      run: |
+        curl -f -H "Authorization: Bearer ${{ secrets.BOT_API_SECRET }}" \
+        https://svitlo-bot-wandering-voice-5007.fly.dev/api/users -o users.json
     
     - name: Install dependencies
       run: |
