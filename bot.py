@@ -1,9 +1,8 @@
 import os
-import json
 import logging
 import sqlite3
 import threading
-import subprocess
+from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -21,50 +20,6 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# API endpoint to fetch users
-@app.route('/api/users', methods=['GET'])
-def get_users():
-    # Check authorization
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {os.environ.get('API_SECRET')}":
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    # Query SQLite database
-    conn = sqlite3.connect('/data/users.db')
-    cursor = conn.execute('SELECT user_id, group_id FROM users')
-    users = [{'user_id': row[0], 'group_id': row[1]} for row in cursor.fetchall()]
-    conn.close()
-    
-    return jsonify({'users': users})
-
-# Health check endpoint
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok'})
-
-def run_flask():
-    # Fly.io binds to port 8080 by default
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def run_bot():
-    # Your existing bot code
-    application = Application.builder().token(os.environ['BOT_TOKEN']).build()
-    # Add your handlers here
-    application.run_polling()
-
-def init_database():
-    conn = sqlite3.connect('/data/users.db')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            group_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -74,78 +29,150 @@ SELECTING_GROUP = 1
 # Maximum number of users allowed
 MAX_USERS = 15
 
+# Database path
+DB_PATH = '/data/users.db'
+
+
 class UserStorage:
-    def __init__(self, filepath='data/users.json', repo_path='.'):
-        self.filepath = filepath
-        self.repo_path = repo_path
-        self.git_enabled = os.getenv('GIT_SYNC_ENABLED', 'false').lower() == 'true'
-        self.users = self._load()
+    def __init__(self, db_path=DB_PATH):
+        self.db_path = db_path
+        self._init_database()
     
-    def _load(self):
-        try:
-            # Pull latest from git if enabled
-            if self.git_enabled:
-                self._git_pull()
-            
-            with open(self.filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
+    def _init_database(self):
+        """Initialize the database and create tables if they don't exist"""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info(f"Database initialized at {self.db_path}")
     
-    def _git_pull(self):
-        """Pull latest changes from git"""
-        try:
-            subprocess.run(['git', 'pull'], cwd=self.repo_path, check=True, capture_output=True)
-            logger.info("✓ Pulled latest data from git")
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Git pull failed: {e}")
-        except FileNotFoundError:
-            logger.warning("Git not available in container")
-    
-    def _git_commit_push(self, message):
-        """Commit and push changes to git"""
-        if not self.git_enabled:
-            return
-        
-        try:
-            subprocess.run(['git', 'add', self.filepath], cwd=self.repo_path, check=True)
-            subprocess.run(['git', 'commit', '-m', message], cwd=self.repo_path, check=True)
-            subprocess.run(['git', 'push'], cwd=self.repo_path, check=True)
-            logger.info(f"✓ Pushed changes to git: {message}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git commit/push failed: {e}")
-        except FileNotFoundError:
-            logger.warning("Git not available in container")
-    
-    def save(self):
-        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-        with open(self.filepath, 'w', encoding='utf-8') as f:
-            json.dump(self.users, f, ensure_ascii=False, indent=2)
-        
-        # Commit to git if enabled
-        self._git_commit_push("Update user data")
+    def _get_connection(self):
+        """Get a database connection"""
+        return sqlite3.connect(self.db_path)
     
     def get_user(self, user_id):
-        return self.users.get(str(user_id))
+        """Get user data by user_id"""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            'SELECT user_id, group_id, username, first_name FROM users WHERE user_id = ?',
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'user_id': row[0],
+                'group': row[1],
+                'username': row[2],
+                'first_name': row[3]
+            }
+        return None
     
     def set_user(self, user_id, data):
-        self.users[str(user_id)] = data
-        self.save()
+        """Insert or update user data"""
+        conn = self._get_connection()
+        
+        # Use INSERT OR REPLACE to handle both insert and update
+        conn.execute('''
+            INSERT OR REPLACE INTO users (user_id, group_id, username, first_name, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            data.get('group'),
+            data.get('username'),
+            data.get('first_name'),
+            datetime.now()
+        ))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"User {user_id} saved with group {data.get('group')}")
     
     def get_all_users(self):
-        return self.users
+        """Get all users as a dictionary"""
+        conn = self._get_connection()
+        cursor = conn.execute('SELECT user_id, group_id, username, first_name FROM users')
+        
+        users = {}
+        for row in cursor.fetchall():
+            users[str(row[0])] = {
+                'user_id': row[0],
+                'group': row[1],
+                'username': row[2],
+                'first_name': row[3]
+            }
+        
+        conn.close()
+        return users
     
     def delete_user(self, user_id):
-        if str(user_id) in self.users:
-            del self.users[str(user_id)]
-            self.save()
+        """Delete a user"""
+        conn = self._get_connection()
+        conn.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"User {user_id} deleted")
+    
+    def get_user_count(self):
+        """Get total number of users"""
+        conn = self._get_connection()
+        cursor = conn.execute('SELECT COUNT(*) FROM users')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
 
+
+# Initialize storage
 storage = UserStorage()
+
+
+# API endpoint to fetch users
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    # Check authorization
+    auth_header = request.headers.get('Authorization')
+    expected_auth = f"Bearer {os.environ.get('API_SECRET')}"
+    
+    if auth_header != expected_auth:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    # Query SQLite database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute('SELECT user_id, group_id FROM users')
+    users = [{'user_id': row[0], 'group_id': row[1]} for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({'users': users})
+
+
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
+
+
+def run_flask():
+    """Run Flask server"""
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
 
 def check_user_limit():
     """Check if user limit has been reached"""
-    current_users = len(storage.get_all_users())
+    current_users = storage.get_user_count()
     return current_users < MAX_USERS
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -171,6 +198,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     return ConversationHandler.END
+
 
 async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -204,6 +232,7 @@ async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     return SELECTING_GROUP
+
 
 async def group_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -243,6 +272,7 @@ async def group_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
+
 async def my_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = storage.get_user(user_id)
@@ -255,6 +285,7 @@ async def my_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Група не встановлена. Використайте /setgroup для налаштування."
         )
 
+
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     storage.delete_user(user_id)
@@ -263,8 +294,9 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ви відписалися від сповіщень. Для повторної підписки використайте /start"
     )
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current_users = len(storage.get_all_users())
+    current_users = storage.get_user_count()
     await update.message.reply_text(
         "📋 Доступні команди:\n\n"
         "/start - Почати роботу з ботом\n"
@@ -275,12 +307,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Користувачів: {current_users}/{MAX_USERS}"
     )
 
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Скасовано.",
         reply_markup=ReplyKeyboardRemove()
     )
     return ConversationHandler.END
+
 
 def main():
     import asyncio
@@ -315,18 +349,18 @@ def main():
     logger.info("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    init_database()
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
 
+if __name__ == '__main__':
     import asyncio
+    
     # Ensure event loop exists for Python 3.14+
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-        # Run Flask in a separate thread
+    
+    # Run Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
     main()
