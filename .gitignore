@@ -20,3 +20,6 @@ ENV/
 # Debug files (optional - you might want to track these)
 data/last_fetch.json
 data/last_fetch.html
+
+#data file for schedule fetch
+data/schedules.json

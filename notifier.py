@@ -54,32 +54,71 @@ class ScheduleNotifier:
             logger.error(f"Failed to send notification to user {user_id}: {e}")
             return False
     
-    def format_change_message(self, group_id, old_data, new_data):
-        """Format a message about schedule changes"""
-        message = "⚡️ <b>Зміна графіку відключень!</b>\n\n"
-        message += f"Група: <b>{group_id}</b>\n\n"
+    def format_schedule_message(group_id, schedule_entries):
+        """Format schedule for today and tomorrow"""
+        import re
         
-        if new_data and len(new_data) > 0:
-            latest_schedule = new_data[0]  # Get the most recent entry
+        def calculate_power_times(schedule_text):
+            """Calculate ON and OFF times"""
+            pattern = re.compile(r'з (\d{1,2}):(\d{2}) до (\d{1,2}):(\d{2})')
+            off_ranges = []
             
-            # Add date/timestamp if available
-            schedule_date = latest_schedule.get('date', '')
-            if schedule_date:
-                message += f"📅 <b>{schedule_date}</b>\n\n"
+            for match in pattern.finditer(schedule_text):
+                start_h, start_m, end_h, end_m = map(int, match.groups())
+                start_min = start_h * 60 + start_m
+                end_min = (end_h * 60 + end_m) if end_h != 24 else 1440
+                off_ranges.append((start_min, end_min))
             
-            # Add the actual schedule
-            schedule_text = latest_schedule.get('schedule', '')
-            if schedule_text:
-                # Clean up the text
-                schedule_text = schedule_text.replace('Електроенергії немає з', '🔴 Немає світла:')
-                schedule_text = schedule_text.strip()
-                message += f"📋 {schedule_text}\n"
-            else:
-                message += "📋 <b>Опубліковано новий графік</b>\n"
-                message += "Деталі доступні на сайті: https://poweron.loe.lviv.ua/\n"
+            off_ranges.sort()
+            merged = []
+            for start, end in off_ranges:
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            
+            on_ranges = []
+            current = 0
+            for off_start, off_end in merged:
+                if current < off_start:
+                    on_ranges.append((current, off_start))
+                current = max(current, off_end)
+            
+            if current < 1440:
+                on_ranges.append((current, 1440))
+            
+            def fmt(minutes):
+                h, m = divmod(minutes, 60)
+                return f"{h:02d}:{m:02d}"
+            
+            off_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in merged)
+            on_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in on_ranges)
+            
+            return on_text or "немає", off_text or "немає"
+        
+        message = f"📋 <b>Графік для групи {group_id}</b>\n\n"
+        
+        for idx, entry in enumerate(schedule_entries[:2]):  # Today and tomorrow
+            date = entry.get('date', '')
+            schedule = entry.get('schedule', '')
+            
+            if not schedule:
+                continue
+            
+            label = "Сьогодні" if idx == 0 else "Завтра"
+            if date and date != "Today":
+                label = date
+            
+            on_time, off_time = calculate_power_times(schedule)
+            
+            message += f"📅 <b>{label}</b>\n\n"
+            message += f"🟢 <b>Є світло:</b> {on_time}\n"
+            message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
+        
+        if len(schedule_entries) == 0:
+            message += "ℹ️ Графік наразі недоступний."
         else:
-            message += "📋 <b>Опубліковано новий графік</b>\n"
-            message += "Перевірте деталі на сайті: https://poweron.loe.lviv.ua/\n"
+            message += "ℹ️ Графік може змінюватися протягом дня."
         
         return message
     

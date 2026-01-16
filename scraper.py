@@ -58,7 +58,7 @@ class ScheduleScraper:
             return None
     
     def parse_schedule(self, json_content):
-        """Parse the schedule from API JSON response"""
+        """Parse schedule, extracting only relevant data"""
         if not json_content:
             return None
         
@@ -67,37 +67,22 @@ class ScheduleScraper:
             
             schedule_data = {
                 'timestamp': datetime.now().isoformat(),
-                'groups': {},
-                'raw_data': {}
+                'groups': {}
             }
             
-            # Extract menu items
             members = data.get('hydra:member', [])
             
             for member in members:
                 menu_items = member.get('menuItems', [])
                 
                 for item in menu_items:
-                    # Get the raw HTML content
                     raw_html = item.get('rawHtml', '')
-                    raw_mobile_html = item.get('rawMobileHtml', '')
-                    name = item.get('name', '')
-                    description = item.get('description', '')
                     
-                    # Store metadata
-                    schedule_data['raw_data'][name] = {
-                        'name': name,
-                        'description': description,
-                        'html': raw_html,
-                        'mobile_html': raw_mobile_html
-                    }
-                    
-                    # Parse HTML to extract group schedules
+                    # Parse HTML
                     soup = BeautifulSoup(raw_html, 'html.parser')
                     text = soup.get_text()
                     
-                    # Find all group mentions (Група 1.1, Група 2.2, etc.)
-                    import re
+                    # Extract groups
                     group_pattern = re.compile(r'Група (\d+\.\d+)\. (.+?)(?=Група \d+\.\d+\.|$)', re.DOTALL)
                     matches = group_pattern.findall(text)
                     
@@ -105,16 +90,11 @@ class ScheduleScraper:
                         if group_num not in schedule_data['groups']:
                             schedule_data['groups'][group_num] = []
                         
+                        # Only store schedule text (no timestamps)
                         schedule_data['groups'][group_num].append({
-                            'date': name,
-                            'schedule': schedule_text.strip(),
-                            'timestamp': item.get('name', '')
+                            'date': item.get('name', ''),  # Keep date for display
+                            'schedule': schedule_text.strip()  # Main content for hash
                         })
-            
-            logger.info(f"✓ Parsed {len(schedule_data['groups'])} groups")
-            
-            if schedule_data['groups']:
-                logger.info(f"  Groups: {', '.join(sorted(schedule_data['groups'].keys()))}")
             
             return schedule_data
             
@@ -123,10 +103,28 @@ class ScheduleScraper:
             return None
     
     def calculate_hash(self, data):
-        """Calculate hash of schedule data"""
+        """Calculate hash only from schedule content, ignore timestamps"""
         if not data:
             return None
-        json_str = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        
+        # Extract only schedule-relevant data
+        relevant_data = {
+            'groups': data.get('groups', {})
+        }
+        
+        # Remove timestamps and metadata
+        for group_id, entries in relevant_data['groups'].items():
+            cleaned_entries = []
+            for entry in entries:
+                # Only include schedule text, ignore date/timestamp
+                cleaned_entry = {
+                    'schedule': entry.get('schedule', '')
+                }
+                cleaned_entries.append(cleaned_entry)
+            relevant_data['groups'][group_id] = cleaned_entries
+        
+        # Calculate hash
+        json_str = json.dumps(relevant_data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
     
     def check_for_changes(self):

@@ -165,6 +165,74 @@ def check_user_limit():
     current_users = storage.get_user_count()
     return current_users < MAX_USERS
 
+def format_schedule_message(group_id, schedule_entries):
+    """Format schedule for today and tomorrow"""
+    import re
+    
+    def calculate_power_times(schedule_text):
+        """Calculate ON and OFF times"""
+        pattern = re.compile(r'з (\d{1,2}):(\d{2}) до (\d{1,2}):(\d{2})')
+        off_ranges = []
+        
+        for match in pattern.finditer(schedule_text):
+            start_h, start_m, end_h, end_m = map(int, match.groups())
+            start_min = start_h * 60 + start_m
+            end_min = (end_h * 60 + end_m) if end_h != 24 else 1440
+            off_ranges.append((start_min, end_min))
+        
+        off_ranges.sort()
+        merged = []
+        for start, end in off_ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        
+        on_ranges = []
+        current = 0
+        for off_start, off_end in merged:
+            if current < off_start:
+                on_ranges.append((current, off_start))
+            current = max(current, off_end)
+        
+        if current < 1440:
+            on_ranges.append((current, 1440))
+        
+        def fmt(minutes):
+            h, m = divmod(minutes, 60)
+            return f"{h:02d}:{m:02d}"
+        
+        off_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in merged)
+        on_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in on_ranges)
+        
+        return on_text or "немає", off_text or "немає"
+    
+    message = f"📋 <b>Графік для групи {group_id}</b>\n\n"
+    
+    for idx, entry in enumerate(schedule_entries[:2]):  # Today and tomorrow
+        date = entry.get('date', '')
+        schedule = entry.get('schedule', '')
+        
+        if not schedule:
+            continue
+        
+        label = "Сьогодні" if idx == 0 else "Завтра"
+        if date and date != "Today":
+            label = date
+        
+        on_time, off_time = calculate_power_times(schedule)
+        
+        message += f"📅 <b>{label}</b>\n\n"
+        message += f"🟢 <b>Є світло:</b> {on_time}\n"
+        message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
+    
+    if len(schedule_entries) == 0:
+        message += "ℹ️ Графік наразі недоступний."
+    else:
+        message += "ℹ️ Графік може змінюватися протягом дня."
+    
+    return message
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -291,6 +359,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Доступні команди:\n\n"
         "/start - Почати роботу з ботом\n"
         "/setgroup - Встановити/змінити групу відключень\n"
+        "/schedule - Показати графік\n"
         "/mygroup - Показати поточну групу\n"
         "/stop - Відписатися від сповіщень\n"
         "/help - Показати цю допомогу\n\n"
@@ -305,6 +374,54 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /schedule command - show current schedule for user's group"""
+    user_id = update.effective_user.id
+    user_data = storage.get_user(user_id)
+    
+    if not user_data:
+        await update.message.reply_text(
+            "Спочатку оберіть групу: /setgroup"
+        )
+        return
+    
+    group = user_data.get('group')
+    
+    # Fetch current schedule
+    try:
+        scraper = ScheduleScraper()
+        result = scraper.check_for_changes()
+        
+        if not result or not result.get('new_schedule'):
+            await update.message.reply_text(
+                "❌ Не вдалося отримати графік. Спробуйте пізніше."
+            )
+            return
+        
+        schedule = result['new_schedule']
+        groups_data = schedule.get('groups', {})
+        user_schedule = groups_data.get(group)
+        
+        if not user_schedule or len(user_schedule) == 0:
+            await update.message.reply_text(
+                f"📋 Графік для групи <b>{group}</b> наразі недоступний.",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Format message with today and tomorrow
+        message = format_schedule_message(group, user_schedule)
+        
+        await update.message.reply_text(
+            message,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error fetching schedule: {e}")
+        await update.message.reply_text(
+            "❌ Помилка при отриманні графіку."
+        )
 
 def main():
     import asyncio
@@ -335,6 +452,7 @@ def main():
     application.add_handler(CommandHandler('mygroup', my_group))
     application.add_handler(CommandHandler('stop', stop))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('schedule', schedule_command))
     
     logger.info("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
