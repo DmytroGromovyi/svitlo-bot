@@ -54,82 +54,83 @@ class ScheduleNotifier:
             logger.error(f"Failed to send notification to user {user_id}: {e}")
             return False
     
-    def format_schedule_message(group_id, schedule_entries):
-        """Format schedule for today and tomorrow"""
+    def _calculate_power_times(self, schedule_text):
+        """Calculate power ON and OFF times from schedule text"""
         import re
         
-        def calculate_power_times(schedule_text):
-            """Calculate ON and OFF times"""
-            pattern = re.compile(r'з (\d{1,2}):(\d{2}) до (\d{1,2}):(\d{2})')
-            off_ranges = []
-            
-            for match in pattern.finditer(schedule_text):
-                start_h, start_m, end_h, end_m = map(int, match.groups())
-                start_min = start_h * 60 + start_m
-                end_min = (end_h * 60 + end_m) if end_h != 24 else 1440
-                off_ranges.append((start_min, end_min))
-            
-            off_ranges.sort()
-            merged = []
-            for start, end in off_ranges:
-                if merged and start <= merged[-1][1]:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-                else:
-                    merged.append((start, end))
-            
-            on_ranges = []
-            current = 0
-            for off_start, off_end in merged:
-                if current < off_start:
-                    on_ranges.append((current, off_start))
-                current = max(current, off_end)
-            
-            if current < 1440:
-                on_ranges.append((current, 1440))
-            
-            def fmt(minutes):
-                h, m = divmod(minutes, 60)
-                return f"{h:02d}:{m:02d}"
-            
-            off_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in merged)
-            on_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in on_ranges)
-            
-            return on_text or "немає", off_text or "немає"
+        # Extract OFF times: "з 03:00 до 06:30"
+        pattern = re.compile(r'з (\d{1,2}):(\d{2}) до (\d{1,2}):(\d{2})')
+        off_ranges = []
         
-        message = f"📋 <b>Графік для групи {group_id}</b>\n\n"
+        for match in pattern.finditer(schedule_text):
+            start_h, start_m, end_h, end_m = map(int, match.groups())
+            start_min = start_h * 60 + start_m
+            end_min = (end_h * 60 + end_m) if end_h != 24 else 1440
+            off_ranges.append((start_min, end_min))
         
-        for idx, entry in enumerate(schedule_entries[:2]):  # Today and tomorrow
-            date = entry.get('date', '')
-            schedule = entry.get('schedule', '')
-            
-            if not schedule:
-                continue
-            
-            label = "Сьогодні" if idx == 0 else "Завтра"
-            if date and date != "Today":
-                label = date
-            
-            on_time, off_time = calculate_power_times(schedule)
-            
-            message += f"📅 <b>{label}</b>\n\n"
-            message += f"🟢 <b>Є світло:</b> {on_time}\n"
-            message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
+        # Sort and merge overlapping ranges
+        off_ranges.sort()
+        merged = []
+        for start, end in off_ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
         
-        if len(schedule_entries) == 0:
-            message += "ℹ️ Графік наразі недоступний."
-        else:
+        # Calculate ON times (gaps between OFF times)
+        on_ranges = []
+        current = 0
+        for off_start, off_end in merged:
+            if current < off_start:
+                on_ranges.append((current, off_start))
+            current = max(current, off_end)
+        
+        if current < 1440:
+            on_ranges.append((current, 1440))
+        
+        # Format times
+        def fmt(minutes):
+            h, m = divmod(minutes, 60)
+            return f"{h:02d}:{m:02d}"
+        
+        off_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in merged)
+        on_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in on_ranges)
+        
+        return on_text or "немає", off_text or "немає"
+    
+    def format_change_message(self, group_id, old_data, new_data):
+        """Format notification message for schedule changes - show today and tomorrow"""
+        message = f"⚡️ <b>Оновлення графіку відключень!</b>\n\n"
+        message += f"Група: <b>{group_id}</b>\n\n"
+        
+        if new_data and len(new_data) > 0:
+            # Show up to 2 days (today and tomorrow)
+            for idx, schedule_entry in enumerate(new_data[:2]):
+                schedule_date = schedule_entry.get('date', '')
+                schedule_text = schedule_entry.get('schedule', '')
+                
+                if not schedule_text:
+                    continue
+                
+                # Determine label
+                label = "Сьогодні" if idx == 0 else "Завтра"
+                if schedule_date and schedule_date != "Today":
+                    label = schedule_date
+                
+                message += f"📅 <b>{label}</b>\n\n"
+                
+                # Calculate power ON and OFF times
+                on_time, off_time = self._calculate_power_times(schedule_text)
+                
+                message += f"🟢 <b>Є світло:</b> {on_time}\n"
+                message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
+            
             message += "ℹ️ Графік може змінюватися протягом дня."
+        else:
+            message += "📋 <b>Опубліковано новий графік</b>\n"
+            message += "Використайте /schedule для перегляду."
         
         return message
-    
-    def _extract_schedule_summary(self, schedule_data):
-        """Extract a brief summary from schedule data"""
-        if isinstance(schedule_data, dict):
-            content = schedule_data.get('content', '')
-            # Return first 200 characters
-            if content:
-                return content[:200] + "..." if len(content) > 200 else content
-        return "Деталі доступні на сайті"
     
     async def check_and_notify(self):
         """Check for schedule changes and notify users"""
