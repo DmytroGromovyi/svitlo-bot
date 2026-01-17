@@ -1,11 +1,11 @@
 import os
-import json
 import logging
 import asyncio
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.error import TelegramError
 from scraper import ScheduleScraper
+from bot import UserStorage
 
 
 # Load environment variables from .env file
@@ -20,29 +20,7 @@ class ScheduleNotifier:
     def __init__(self, bot_token):
         self.bot = Bot(token=bot_token)
         self.scraper = ScheduleScraper()
-    
-    def load_users_from_file(self, filepath='users.json'):
-        """Load users from the JSON file fetched by GitHub Actions"""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                users_list = data.get('users', [])
-                
-                # Convert to dict format: {user_id: {'group': group_id}}
-                users_dict = {}
-                for user in users_list:
-                    user_id = str(user.get('user_id'))
-                    group_id = user.get('group_id')
-                    users_dict[user_id] = {'group': group_id}
-                
-                logger.info(f"Loaded {len(users_dict)} users from {filepath}")
-                return users_dict
-        except FileNotFoundError:
-            logger.error(f"File {filepath} not found")
-            return {}
-        except Exception as e:
-            logger.error(f"Error loading users: {e}")
-            return {}
+        self.user_storage = UserStorage()
     
     async def send_notification(self, user_id, message):
         """Send notification to a specific user"""
@@ -99,36 +77,86 @@ class ScheduleNotifier:
         return on_text or "немає", off_text or "немає"
     
     def format_change_message(self, group_id, old_data, new_data):
-        """Format notification message for schedule changes - show today and tomorrow"""
-        message = f"⚡️ <b>Оновлення графіку відключень!</b>\n\n"
+        """Format notification message for schedule changes with visual comparison"""
+        message = f"⚡️ <b>Зміна графіку відключень!</b>\n\n"
         message += f"Група: <b>{group_id}</b>\n\n"
         
-        if new_data and len(new_data) > 0:
-            # Show up to 2 days (today and tomorrow)
-            for idx, schedule_entry in enumerate(new_data[:2]):
-                schedule_date = schedule_entry.get('date', '')
-                schedule_text = schedule_entry.get('schedule', '')
-                
-                if not schedule_text:
-                    continue
-                
-                # Determine label
-                label = "Сьогодні" if idx == 0 else "Завтра"
-                if schedule_date and schedule_date != "Today":
-                    label = schedule_date
-                
-                message += f"📅 <b>{label}</b>\n\n"
-                
-                # Calculate power ON and OFF times
-                on_time, off_time = self._calculate_power_times(schedule_text)
-                
-                message += f"🟢 <b>Є світло:</b> {on_time}\n"
-                message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
-            
-            message += "ℹ️ Графік може змінюватися протягом дня."
-        else:
+        # Convert old_data and new_data to dictionaries by date for easier comparison
+        old_by_date = {}
+        if old_data:
+            for entry in old_data:
+                date = entry.get('date', '')
+                if date:
+                    old_by_date[date] = entry.get('schedule', '')
+        
+        new_by_date = {}
+        if new_data:
+            for entry in new_data:
+                date = entry.get('date', '')
+                if date:
+                    new_by_date[date] = entry.get('schedule', '')
+        
+        # Get all unique dates (from both old and new)
+        all_dates = set(old_by_date.keys()) | set(new_by_date.keys())
+        
+        if not all_dates:
             message += "📋 <b>Опубліковано новий графік</b>\n"
             message += "Використайте /schedule для перегляду."
+            return message
+        
+        # Sort dates: Today first, then Tomorrow, then others
+        date_order = ['Today', 'Tomorrow']
+        sorted_dates = sorted(all_dates, key=lambda x: (
+            date_order.index(x) if x in date_order else 999,
+            x
+        ))
+        
+        # Format each date's changes (show up to 2 days)
+        for idx, date in enumerate(sorted_dates[:2]):
+            old_schedule = old_by_date.get(date, '')
+            new_schedule = new_by_date.get(date, '')
+            
+            # Format date header
+            date_display = "Сьогодні" if date == 'Today' else ("Завтра" if date == 'Tomorrow' else date)
+            
+            message += f"📅 <b>{date_display}</b>\n"
+            
+            # If schedule changed or is new
+            if old_schedule != new_schedule:
+                if old_schedule and new_schedule:
+                    # Both exist - show old crossed out and new
+                    old_on, old_off = self._calculate_power_times(old_schedule)
+                    new_on, new_off = self._calculate_power_times(new_schedule)
+                    
+                    # Show old values crossed out
+                    message += f"   <s>🟢 Є світло: {old_on}</s>\n"
+                    message += f"   <s>🔴 Немає світла: {old_off}</s>\n"
+                    
+                    # Show new values with checkmark
+                    message += f"   ✅ 🟢 <b>Є світло:</b> {new_on}\n"
+                    message += f"   ✅ 🔴 <b>Немає світла:</b> {new_off}\n"
+                elif old_schedule and not new_schedule:
+                    # Schedule was removed
+                    old_on, old_off = self._calculate_power_times(old_schedule)
+                    message += f"   <s>🟢 Є світло: {old_on}</s>\n"
+                    message += f"   <s>🔴 Немає світла: {old_off}</s>\n"
+                    message += f"   ❌ Графік видалено\n"
+                elif new_schedule and not old_schedule:
+                    # New schedule added
+                    new_on, new_off = self._calculate_power_times(new_schedule)
+                    message += f"   ✅ <b>Новий графік:</b>\n"
+                    message += f"   🟢 <b>Є світло:</b> {new_on}\n"
+                    message += f"   🔴 <b>Немає світла:</b> {new_off}\n"
+            else:
+                # No change (shouldn't happen if we're here, but handle it)
+                if new_schedule:
+                    new_on, new_off = self._calculate_power_times(new_schedule)
+                    message += f"   🟢 <b>Є світло:</b> {new_on}\n"
+                    message += f"   🔴 <b>Немає світла:</b> {new_off}\n"
+            
+            message += "\n"
+        
+        message += "ℹ️ Графік може змінюватися протягом дня."
         
         return message
     
@@ -149,8 +177,8 @@ class ScheduleNotifier:
         
         logger.info("Changes detected! Preparing notifications...")
         
-        # Load users from file (fetched by GitHub Actions)
-        users = self.load_users_from_file('users.json')
+        # Get all users from database
+        users = self.user_storage.get_all_users()
         
         if not users:
             logger.info("No users registered, skipping notifications")

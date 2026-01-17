@@ -154,6 +154,101 @@ def get_users():
 def health():
     return jsonify({'status': 'ok'})
 
+@app.route('/webhook', methods=['POST', 'GET'])
+def webhook():
+    """
+    Handle incoming Telegram updates via webhook (Telegram-compliant)
+    
+    Telegram Requirements:
+    - Must accept POST requests with JSON body
+    - Must return 200 OK quickly (within seconds)
+    - Should process updates asynchronously
+    - Should handle errors gracefully
+    """
+    # Handle GET requests (Telegram may send GET for verification)
+    if request.method == 'GET':
+        return jsonify({'status': 'webhook_endpoint_active'}), 200
+    
+    # Handle POST requests (actual updates)
+    try:
+        # Telegram requires quick response (within seconds)
+        if not application:
+            logger.error("Application not initialized")
+            return jsonify({'ok': False, 'error': 'Application not initialized'}), 500
+        
+        # Parse update from JSON
+        if not request.is_json:
+            logger.warning("Received non-JSON webhook request")
+            return jsonify({'ok': False, 'error': 'Invalid content type'}), 400
+        
+        json_data = request.get_json()
+        if not json_data:
+            logger.warning("Received empty webhook request")
+            return jsonify({'ok': False, 'error': 'Empty request'}), 400
+        
+        # Optional: Verify secret token (if WEBHOOK_SECRET is set)
+        webhook_secret = os.getenv('WEBHOOK_SECRET')
+        if webhook_secret:
+            secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+            if secret_header != webhook_secret:
+                logger.warning("Invalid webhook secret token")
+                return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+        
+        # Deserialize Update object
+        try:
+            update = Update.de_json(json_data, application.bot)
+            if not update:
+                logger.warning("Failed to deserialize update")
+                return jsonify({'ok': False, 'error': 'Invalid update format'}), 400
+        except Exception as e:
+            logger.error(f"Error deserializing update: {e}")
+            return jsonify({'ok': False, 'error': 'Invalid update format'}), 400
+        
+        # Process update asynchronously in a separate thread
+        # This ensures we return quickly to Telegram (required for webhook compliance)
+        def process_update_async():
+            """Process update in a separate thread with its own event loop"""
+            import asyncio
+            loop = None
+            try:
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Process the update
+                loop.run_until_complete(application.process_update(update))
+                logger.debug(f"Successfully processed update {update.update_id}")
+            except Exception as e:
+                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
+            finally:
+                # Clean up event loop
+                if loop:
+                    try:
+                        # Cancel pending tasks
+                        pending = asyncio.all_tasks(loop)
+                        for task in pending:
+                            task.cancel()
+                        # Wait for tasks to complete cancellation
+                        if pending:
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                        loop.close()
+                    except Exception:
+                        pass
+        
+        # Start processing in background thread (non-blocking)
+        thread = threading.Thread(target=process_update_async, daemon=True)
+        thread.start()
+        
+        # Return immediately to Telegram (webhook compliance requirement)
+        # Telegram expects 200 OK response within a few seconds
+        return jsonify({'ok': True}), 200
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in webhook handler: {e}", exc_info=True)
+        # Still return 200 to avoid Telegram retrying with same update
+        # Telegram will retry failed webhooks, so we return 200 even on error
+        return jsonify({'ok': False, 'error': 'Internal server error'}), 200
+
 
 def run_flask():
     """Run Flask server"""
@@ -424,7 +519,12 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Помилка при отриманні графіку."
         )
 
-def main():
+# Global application instance
+application = None
+
+def setup_bot():
+    """Setup Telegram bot application"""
+    global application
     import asyncio
     
     # Fix for Python 3.14 - ensure event loop exists BEFORE building application
@@ -455,8 +555,66 @@ def main():
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('schedule', schedule_command))
     
-    logger.info("Bot is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Initialize application (but don't start polling)
+    application.initialize()
+    
+    logger.info("Bot application initialized (webhook mode)")
+    return application
+
+async def setup_webhook():
+    """Setup webhook URL with Telegram (Telegram-compliant)"""
+    global application
+    if not application:
+        setup_bot()
+    
+    webhook_url = os.getenv('WEBHOOK_URL')
+    if not webhook_url:
+        logger.warning("WEBHOOK_URL not set, webhook will not be configured")
+        return
+    
+    # Optional: Get secret token for webhook security
+    webhook_secret = os.getenv('WEBHOOK_SECRET')
+    
+    # Set webhook with all required parameters
+    webhook_params = {
+        'url': f"{webhook_url}/webhook",
+        'allowed_updates': Update.ALL_TYPES,
+        'drop_pending_updates': False  # Keep pending updates
+    }
+    
+    # Add secret token if configured (recommended for security)
+    if webhook_secret:
+        webhook_params['secret_token'] = webhook_secret
+        logger.info("Webhook secret token configured")
+    
+    try:
+        await application.bot.set_webhook(**webhook_params)
+        logger.info(f"Webhook set to: {webhook_url}/webhook")
+        
+        # Verify webhook was set correctly
+        webhook_info = await application.bot.get_webhook_info()
+        logger.info(f"Webhook info: URL={webhook_info.url}, Pending updates={webhook_info.pending_update_count}")
+        
+        if webhook_info.url != f"{webhook_url}/webhook":
+            logger.warning(f"Webhook URL mismatch! Expected: {webhook_url}/webhook, Got: {webhook_info.url}")
+        
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}", exc_info=True)
+        raise
+
+def main():
+    """Main function - setup bot and run Flask"""
+    setup_bot()
+    
+    # Setup webhook asynchronously
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    loop.run_until_complete(setup_webhook())
 
 
 if __name__ == '__main__':
@@ -468,8 +626,9 @@ if __name__ == '__main__':
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
     
-    # Run Flask in a separate thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
+    # Setup bot first
     main()
+    
+    # Run Flask (webhook will be handled by Flask endpoint)
+    logger.info("Starting Flask server...")
+    run_flask()
