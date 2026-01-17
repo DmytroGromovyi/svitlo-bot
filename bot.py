@@ -362,6 +362,9 @@ def format_schedule_message(group_number, today, tomorrow, updated_at):
     message += "ℹ️ _Графік може змінюватися протягом дня_"
     
     return message
+
+
+async def check_schedule_and_notify():
     """Check for schedule changes and notify users"""
     global bot_app
     
@@ -473,6 +476,7 @@ def format_schedule_message(group_number, today, tomorrow, updated_at):
         
     except Exception as e:
         logger.error(f"❌ Error in schedule checker: {e}", exc_info=True)
+        
 
 async def schedule_checker_loop():
     """Background task that checks schedule every 5 minutes"""
