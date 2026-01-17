@@ -8,9 +8,12 @@ This version uses webhooks instead of polling for better efficiency on Fly.io
 import os
 import logging
 import sqlite3
+import json
 from typing import Optional
 from pathlib import Path
-import asyncio
+from queue import Queue
+from threading import Thread
+from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 # Global bot application instance
 bot_app = None
+update_queue = Queue()
 
 # =============================================================================
 # DATABASE FUNCTIONS
@@ -244,14 +248,62 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Note: In production, this would fetch actual schedule from API
-    # For now, show a placeholder message
-    await update.message.reply_text(
-        f"📋 Графік для групи {group}\n\n"
-        f"🔄 Завантаження актуального графіка...\n\n"
-        f"ℹ️ Функція перегляду графіка буде доступна після інтеграції з API.\n"
-        f"Наразі ви отримуватимете сповіщення про зміни."
-    )
+    # Load schedule from storage
+    try:
+        schedule_path = 'data/schedules.json'
+        if not os.path.exists(schedule_path):
+            await update.message.reply_text(
+                f"📋 Графік для групи {group}\n\n"
+                f"ℹ️ Графік ще не завантажено.\n"
+                f"Зачекайте кілька хвилин - бот автоматично перевіряє оновлення кожні 10 хвилин."
+            )
+            return
+        
+        with open(schedule_path, 'r', encoding='utf-8') as f:
+            schedules = json.load(f)
+        
+        last_schedule = schedules.get('last_schedule', {})
+        groups = last_schedule.get('groups', {})
+        
+        if group not in groups:
+            await update.message.reply_text(
+                f"❌ Графік для групи {group} не знайдено.\n\n"
+                f"Можливо, ця група ще не була оновлена в системі."
+            )
+            return
+        
+        group_data = groups[group]
+        
+        # Format schedule message
+        message = f"📋 Графік відключень для групи {group}\n\n"
+        
+        for entry in group_data:
+            date = entry.get('date', 'Невідома дата')
+            schedule_text = entry.get('schedule', 'Немає даних')
+            
+            message += f"📅 {date}\n"
+            message += f"{schedule_text}\n\n"
+        
+        # Add timestamp
+        last_checked = schedules.get('last_checked', 'Невідомо')
+        if last_checked != 'Невідомо':
+            try:
+                checked_dt = datetime.fromisoformat(last_checked)
+                last_checked = checked_dt.strftime('%d.%m.%Y %H:%M')
+            except:
+                pass
+        
+        message += f"ℹ️ Останнє оновлення: {last_checked}\n"
+        message += f"⚡ Графік може змінюватися протягом дня."
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        logger.error(f"Error fetching schedule: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Помилка при завантаженні графіка.\n"
+            f"Спробуйте пізніше або зверніться до адміністратора."
+        )
 
 async def mygroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /mygroup command"""
@@ -283,6 +335,10 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "ℹ️ Ви не були підписані на сповіщення."
         )
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
 # =============================================================================
 # FLASK API
@@ -323,25 +379,42 @@ def get_users():
 @flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
     """Handle incoming webhook updates from Telegram"""
-    global bot_app
+    global update_queue
     
     if request.method == 'POST':
         try:
             update_data = request.get_json(force=True)
-            update = Update.de_json(update_data, bot_app.bot)
-            
-            # Process update in async context
-            asyncio.run(bot_app.process_update(update))
-            
+            # Add update to queue for processing by bot thread
+            update_queue.put(update_data)
             return 'OK', 200
         except Exception as e:
-            logger.error(f"Error processing update: {e}")
+            logger.error(f"Error receiving update: {e}", exc_info=True)
             return 'Error', 500
     return 'Invalid request', 400
 
 # =============================================================================
 # BOT APPLICATION SETUP
 # =============================================================================
+
+async def process_queue_updates():
+    """Process updates from the queue"""
+    global bot_app, update_queue
+    
+    while True:
+        try:
+            # Get update from queue (blocking)
+            if not update_queue.empty():
+                update_data = update_queue.get()
+                update = Update.de_json(update_data, bot_app.bot)
+                await bot_app.process_update(update)
+                update_queue.task_done()
+        except Exception as e:
+            logger.error(f"Error processing queued update: {e}", exc_info=True)
+        
+        # Small delay to prevent CPU spinning
+        await bot_app.bot.loop.create_task(
+            bot_app.bot.loop.create_future()
+        )
 
 async def setup_application():
     """Initialize and set up the bot application"""
@@ -358,6 +431,9 @@ async def setup_application():
     bot_app.add_handler(CommandHandler('mygroup', mygroup_command))
     bot_app.add_handler(CommandHandler('stop', stop_command))
     bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
+    
+    # Add error handler
+    bot_app.add_error_handler(error_handler)
     
     # Initialize the application
     await bot_app.initialize()
@@ -388,6 +464,19 @@ async def setup_application():
     
     logger.info("🤖 Bot application initialized and ready!")
 
+def run_bot():
+    """Run the bot in a separate thread"""
+    import asyncio
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Set up and start the bot
+    loop.run_until_complete(setup_application())
+    
+    # Keep the loop running
+    loop.run_forever()
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -413,11 +502,16 @@ if __name__ == '__main__':
     # Initialize database
     init_db()
     
-    # Set up bot application
-    logger.info("🔧 Initializing bot application...")
-    asyncio.run(setup_application())
+    # Start bot in separate thread
+    logger.info("🔧 Starting bot thread...")
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
     
-    # Run Flask server
+    # Give bot time to initialize
+    import time
+    time.sleep(3)
+    
+    # Run Flask server in main thread
     logger.info("🌐 Starting Flask server...")
     logger.info("=" * 60)
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
