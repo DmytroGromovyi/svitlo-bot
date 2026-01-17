@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Svitlo Bot - Power Outage Notification Bot with Webhook Support
-Enhanced with Calculated Outage Hours
+Restored full original functionality with added Outage Duration Calculation
 """
 
 import os
@@ -11,7 +11,6 @@ import sqlite3
 import json
 import re
 import hashlib
-import time as time_module
 from typing import Optional
 from pathlib import Path
 from queue import Queue
@@ -31,13 +30,7 @@ from flask import Flask, request, jsonify
 # Import scraper
 import sys
 sys.path.append(os.path.dirname(__file__))
-try:
-    from scraper import ScheduleScraper
-except ImportError:
-    # Fallback for local testing if scraper.py isn't present
-    class ScheduleScraper:
-        def fetch_schedule(self): return None
-        def parse_schedule(self, content): return None
+from scraper import ScheduleScraper
 
 # =============================================================================
 # CONFIGURATION
@@ -71,7 +64,9 @@ def init_db():
     cursor = conn.cursor()
     
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    if cursor.fetchone():
+    table_exists = cursor.fetchone() is not None
+    
+    if table_exists:
         cursor.execute("PRAGMA table_info(users)")
         columns = [row[1] for row in cursor.fetchall()]
         if 'group' in columns and 'group_number' not in columns:
@@ -185,12 +180,11 @@ def get_schedule_hash(group_number: str) -> Optional[str]:
     return result[0] if result else None
 
 # =============================================================================
-# SCHEDULE FORMATTING LOGIC (MODIFIED)
+# FORMATTING & CALCULATIONS
 # =============================================================================
 
 def parse_schedule_entries(group_data):
-    today_text = None
-    tomorrow_text = None
+    today_text, tomorrow_text = None, None
     for entry in group_data:
         date_name = entry.get('date', '').lower()
         schedule_text = entry.get('schedule', '')
@@ -205,11 +199,9 @@ def parse_schedule_entries(group_data):
     return today_text, tomorrow_text
 
 def format_schedule_text(schedule_text):
-    """Format schedule text with calculated durations and total sum"""
     if not schedule_text:
         return "ℹ️ Інформація відсутня"
 
-    # Parse OFF ranges using regex
     off_ranges = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', schedule_text)
 
     def to_minutes(t):
@@ -217,13 +209,11 @@ def format_schedule_text(schedule_text):
         return h * 60 + m
 
     def fmt(mins):
-        # Handle 24:00 wrap around visually
         if mins >= 1440: return "24:00"
         return f"{mins // 60:02d}:{mins % 60:02d}"
 
     off_intervals = sorted([(to_minutes(s), to_minutes(e)) for s, e in off_ranges])
 
-    # Build ON intervals
     on_intervals = []
     last_end = 0
     for start, end in off_intervals:
@@ -234,32 +224,23 @@ def format_schedule_text(schedule_text):
         on_intervals.append((last_end, 1440))
 
     lines = []
-
-    # 🟢 ON Section
     lines.append("🟢 *Є світло:*")
     if on_intervals:
         for s, e in on_intervals:
-            if s != e:
-                lines.append(f"  • {fmt(s)} — {fmt(e)}")
+            if s != e: lines.append(f"  • {fmt(s)} — {fmt(e)}")
     else:
-        lines.append("  • немає даних")
+        lines.append("  • немає даних")
 
-    # 🔴 OFF Section (Calculates per-slot and total duration)
     lines.append("\n🔴 *Немає світла:*")
     total_off_minutes = 0
     if off_intervals:
         for s, e in off_intervals:
-            duration_mins = e - s
-            total_off_minutes += duration_mins
-            duration_hours = duration_mins / 60
-            lines.append(f"  • {fmt(s)} — {fmt(e)} ({duration_hours:.1f} год)")
-        
-        # Add Total
-        total_hours = total_off_minutes / 60
-        lines.append(f"\n⏱ *Загалом відключено:* {total_hours:.1f} годин")
+            dur = e - s
+            total_off_minutes += dur
+            lines.append(f"  • {fmt(s)} — {fmt(e)} ({dur/60:.1f} год)")
+        lines.append(f"\n⏱ *Загалом відключено:* {total_off_minutes/60:.1f} годин")
     else:
-        lines.append("  • немає даних")
-        lines.append(f"\n⏱ *Загалом відключено:* 0.0 годин")
+        lines.append("  • немає даних")
 
     return "\n".join(lines)
 
@@ -281,123 +262,128 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
-    message = f"📋 *Графік відключень*\n\n"
-    message += f"📍 Група: *{group_number}*\n\n"
-    if today:
-        message += "📅 *Сьогодні*\n" + format_schedule_text(today) + "\n\n"
-    if tomorrow:
-        message += "📅 *Завтра*\n" + format_schedule_text(tomorrow) + "\n\n"
-    if updated_at:
-        message += f"🕐 Оновлено: _{updated_at}_\n"
+    message = f"📋 *Графік відключень*\n\n📍 Група: *{group_number}*\n\n"
+    if today: message += "📅 *Сьогодні*\n" + format_schedule_text(today) + "\n\n"
+    if tomorrow: message += "📅 *Завтра*\n" + format_schedule_text(tomorrow) + "\n\n"
+    if updated_at: message += f"🕐 Оновлено: _{updated_at}_\n"
     message += "ℹ️ _Графік може змінюватися протягом дня_"
     return message
 
 # =============================================================================
-# BOT LOGIC & BACKGROUND TASKS
+# BACKGROUND TASKS
 # =============================================================================
 
 async def check_schedule_and_notify():
     global bot_app
-    logger.info("🔍 Checking for schedule changes...")
     try:
         scraper = ScheduleScraper()
         json_content = scraper.fetch_schedule()
         if not json_content: return
-        
         new_schedule = scraper.parse_schedule(json_content)
         if not new_schedule: return
         
-        groups = new_schedule.get('groups', {})
+        groups_data = new_schedule.get('groups', {})
         changed_groups = []
-        for group_num, group_data in groups.items():
-            today_text, tomorrow_text = parse_schedule_entries(group_data)
-            if not today_text: continue
-            
-            group_hash_data = f"{today_text}|{tomorrow_text or ''}"
-            new_hash = hashlib.sha256(group_hash_data.encode('utf-8')).hexdigest()
-            if new_hash != get_schedule_hash(group_num):
-                changed_groups.append(group_num)
-                save_schedule_to_db(group_num, today_text or '', tomorrow_text or '', new_hash)
+        for g_num, g_data in groups_data.items():
+            t_text, tm_text = parse_schedule_entries(g_data)
+            if not t_text: continue
+            new_hash = hashlib.sha256(f"{t_text}|{tm_text or ''}".encode('utf-8')).hexdigest()
+            if new_hash != get_schedule_hash(g_num):
+                changed_groups.append(g_num)
+                save_schedule_to_db(g_num, t_text or '', tm_text or '', new_hash)
         
         if not changed_groups: return
         
-        users = get_all_users()
-        for user in users:
+        for user in get_all_users():
             if user['group'] in changed_groups:
                 try:
-                    sched = get_schedule_from_db(user['group'])
-                    msg = format_notification_message(user['group'], sched['today'], sched['tomorrow'])
+                    s = get_schedule_from_db(user['group'])
+                    msg = format_notification_message(user['group'], s['today'], s['tomorrow'])
                     await bot_app.bot.send_message(chat_id=user['chat_id'], text=msg, parse_mode='Markdown')
                     await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error(f"Error notifying {user['chat_id']}: {e}")
-    except Exception as e:
-        logger.error(f"Error in checker: {e}", exc_info=True)
+                except Exception as e: logger.error(f"Notify error {user['chat_id']}: {e}")
+    except Exception as e: logger.error(f"Checker error: {e}", exc_info=True)
 
 async def schedule_checker_loop():
     await asyncio.sleep(10)
     while True:
-        try:
-            await check_schedule_and_notify()
-            await asyncio.sleep(300)
-        except Exception as e:
-            logger.error(f"Error in loop: {e}")
+        await check_schedule_and_notify()
+        await asyncio.sleep(300)
 
 # =============================================================================
-# HANDLERS
+# TELEGRAM HANDLERS
 # =============================================================================
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update, context):
     await update.message.reply_text("Вітаю! 👋\n📍 Оберіть групу: /setgroup\n📋 Графік: /schedule")
 
-async def setgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def setgroup_command(update, context):
     if get_user_group(update.effective_chat.id) is None and get_user_count() >= MAX_USERS:
-        await update.message.reply_text("❌ Ліміт користувачів вичерпано.")
+        await update.message.reply_text("❌ Ліміт користувачів.")
         return
-    keyboard = [[InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
-    await update.message.reply_text("Оберіть групу:", reply_markup=InlineKeyboardMarkup(keyboard))
+    kb = [[InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
+    await update.message.reply_text("Оберіть групу:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def group_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def group_selection(update, context):
     query = update.callback_query
     await query.answer()
     group = query.data.replace("group_", "")
     if save_user_group(query.from_user.id, group):
         await query.edit_message_text(f"✅ Групу {group} збережено! /schedule")
 
-async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def schedule_command(update, context):
     group = get_user_group(update.effective_chat.id)
-    if not group:
-        await update.message.reply_text("❌ Оберіть групу: /setgroup")
+    if not group: 
+        await update.message.reply_text("❌ /setgroup first")
         return
-    sched = get_schedule_from_db(group)
-    if not sched:
-        await update.message.reply_text("ℹ️ Графік завантажується, зачекайте...")
+    s = get_schedule_from_db(group)
+    if not s:
+        await update.message.reply_text("ℹ️ Loading schedule...")
         return
-    
-    msg = format_schedule_message(group, sched['today'], sched['tomorrow'], sched['updated_at'])
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']), parse_mode='Markdown')
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if delete_user(update.effective_chat.id):
-        await update.message.reply_text("✅ Відписано.")
+async def mygroup_command(update, context):
+    g = get_user_group(update.effective_chat.id)
+    await update.message.reply_text(f"📍 Група: {g}" if g else "❌ Не обрана")
+
+async def stop_command(update, context):
+    if delete_user(update.effective_chat.id): await update.message.reply_text("✅ Відписано.")
 
 # =============================================================================
-# WEBHOOK & FLASK SETUP
+# FLASK API ROUTES (RESTORED)
 # =============================================================================
 
 flask_app = Flask(__name__)
+
+@flask_app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'users': get_user_count()}), 200
+
+@flask_app.route('/api/users', methods=['GET'])
+def get_users_api():
+    auth = request.headers.get('Authorization')
+    if not auth or auth.replace('Bearer ', '') != API_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 401
+    users = get_all_users()
+    return jsonify({'users': users, 'count': len(users)}), 200
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
     update_queue.put(request.get_json(force=True))
     return 'OK', 200
 
+# =============================================================================
+# APP RUNNERS
+# =============================================================================
+
 async def process_queue_updates():
     while True:
         if not update_queue.empty():
             data = update_queue.get()
-            update = Update.de_json(data, bot_app.bot)
-            await bot_app.process_update(update)
+            try:
+                update = Update.de_json(data, bot_app.bot)
+                await bot_app.process_update(update)
+            except Exception as e: logger.error(f"Queue error: {e}")
         await asyncio.sleep(0.1)
 
 async def setup_application():
@@ -406,9 +392,9 @@ async def setup_application():
     bot_app.add_handler(CommandHandler('start', start_command))
     bot_app.add_handler(CommandHandler('setgroup', setgroup_command))
     bot_app.add_handler(CommandHandler('schedule', schedule_command))
+    bot_app.add_handler(CommandHandler('mygroup', mygroup_command))
     bot_app.add_handler(CommandHandler('stop', stop_command))
     bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
-    
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
