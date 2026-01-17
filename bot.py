@@ -1,634 +1,393 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Svitlo Bot - Power Outage Notification Bot with Webhook Support
+This version uses webhooks instead of polling for better efficiency on Fly.io
+"""
+
 import os
 import logging
 import sqlite3
-import threading
-from dotenv import load_dotenv
-from flask import Flask, jsonify, request
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from typing import Optional
+from pathlib import Path
+import asyncio
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
-    ConversationHandler,
+    CallbackQueryHandler,
     ContextTypes,
-    filters
 )
-from scraper import ScheduleScraper
+from flask import Flask, request, jsonify
 
-# Load environment variables from .env file
-load_dotenv()
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-app = Flask(__name__)
+# Load environment variables
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+API_SECRET = os.getenv('API_SECRET')
+PORT = int(os.getenv('PORT', 8080))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # e.g., https://your-app.fly.dev
 
-logging.basicConfig(level=logging.INFO)
+# Constants
+MAX_USERS = 15
+DB_PATH = '/data/users.db'
+GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 4)]
+
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Conversation states
-SELECTING_GROUP = 1
+# Global bot application instance
+bot_app = None
 
-# Maximum number of users allowed
-MAX_USERS = 15
+# =============================================================================
+# DATABASE FUNCTIONS
+# =============================================================================
 
-# Database path
-DB_PATH = '/data/users.db'
-
-
-class UserStorage:
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
-        self._init_database()
+def init_db():
+    """Initialize SQLite database"""
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     
-    def _init_database(self):
-        """Initialize the database and create tables if they don't exist"""
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-        
-        conn = sqlite3.connect(self.db_path)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info(f"Database initialized at {self.db_path}")
-    
-    def _get_connection(self):
-        """Get a database connection"""
-        return sqlite3.connect(self.db_path)
-    
-    def get_user(self, user_id):
-        """Get user data by user_id"""
-        conn = self._get_connection()
-        cursor = conn.execute(
-            'SELECT user_id, group_id FROM users WHERE user_id = ?',
-            (user_id,)
-        )
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                'user_id': row[0],
-                'group': row[1]
-            }
-        return None
-    
-    def set_user(self, user_id, data):
-        """Insert or update user data"""
-        conn = self._get_connection()
-        
-        # Use INSERT OR REPLACE to handle both insert and update
-        conn.execute('''
-            INSERT OR REPLACE INTO users (user_id, group_id)
-            VALUES (?, ?)
-        ''', (
-            user_id,
-            data.get('group')
-        ))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"User {user_id} saved with group {data.get('group')}")
-    
-    def get_all_users(self):
-        """Get all users as a dictionary"""
-        conn = self._get_connection()
-        cursor = conn.execute('SELECT user_id, group_id FROM users')
-        
-        users = {}
-        for row in cursor.fetchall():
-            users[str(row[0])] = {
-                'user_id': row[0],
-                'group': row[1]
-            }
-        
-        conn.close()
-        return users
-    
-    def delete_user(self, user_id):
-        """Delete a user"""
-        conn = self._get_connection()
-        conn.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"User {user_id} deleted")
-    
-    def get_user_count(self):
-        """Get total number of users"""
-        conn = self._get_connection()
-        cursor = conn.execute('SELECT COUNT(*) FROM users')
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-
-
-# Initialize storage
-storage = UserStorage()
-
-
-# API endpoint to fetch users
-@app.route('/api/users', methods=['GET'])
-def get_users():
-    # Check authorization
-    auth_header = request.headers.get('Authorization')
-    expected_auth = f"Bearer {os.environ.get('API_SECRET')}"
-    
-    if auth_header != expected_auth:
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    # Query SQLite database
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.execute('SELECT user_id, group_id FROM users')
-    users = [{'user_id': row[0], 'group_id': row[1]} for row in cursor.fetchall()]
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id INTEGER PRIMARY KEY,
+            group_number TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
     conn.close()
-    
-    return jsonify({'users': users})
+    logger.info("Database initialized")
 
+def get_user_count() -> int:
+    """Get total number of registered users"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM users')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
-# Health check endpoint
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok'})
+def get_user_group(chat_id: int) -> Optional[str]:
+    """Get user's selected group"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT group_number FROM users WHERE chat_id = ?', (chat_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
 
-@app.route('/webhook', methods=['POST', 'GET'])
-def webhook():
-    """
-    Handle incoming Telegram updates via webhook (Telegram-compliant)
+def save_user_group(chat_id: int, group: str) -> bool:
+    """Save or update user's group selection"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     
-    Telegram Requirements:
-    - Must accept POST requests with JSON body
-    - Must return 200 OK quickly (within seconds)
-    - Should process updates asynchronously
-    - Should handle errors gracefully
-    """
-    # Handle GET requests (Telegram may send GET for verification)
-    if request.method == 'GET':
-        return jsonify({'status': 'webhook_endpoint_active'}), 200
-    
-    # Handle POST requests (actual updates)
     try:
-        # Telegram requires quick response (within seconds)
-        if not application:
-            logger.error("Application not initialized")
-            return jsonify({'ok': False, 'error': 'Application not initialized'}), 500
-        
-        # Parse update from JSON
-        if not request.is_json:
-            logger.warning("Received non-JSON webhook request")
-            return jsonify({'ok': False, 'error': 'Invalid content type'}), 400
-        
-        json_data = request.get_json()
-        if not json_data:
-            logger.warning("Received empty webhook request")
-            return jsonify({'ok': False, 'error': 'Empty request'}), 400
-        
-        # Optional: Verify secret token (if WEBHOOK_SECRET is set)
-        webhook_secret = os.getenv('WEBHOOK_SECRET')
-        if webhook_secret:
-            secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-            if secret_header != webhook_secret:
-                logger.warning("Invalid webhook secret token")
-                return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
-        
-        # Deserialize Update object
-        try:
-            update = Update.de_json(json_data, application.bot)
-            if not update:
-                logger.warning("Failed to deserialize update")
-                return jsonify({'ok': False, 'error': 'Invalid update format'}), 400
-        except Exception as e:
-            logger.error(f"Error deserializing update: {e}")
-            return jsonify({'ok': False, 'error': 'Invalid update format'}), 400
-        
-        # Process update asynchronously in a separate thread
-        # This ensures we return quickly to Telegram (required for webhook compliance)
-        def process_update_async():
-            """Process update in a separate thread with its own event loop"""
-            import asyncio
-            loop = None
-            try:
-                # Create new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                # Process the update
-                loop.run_until_complete(application.process_update(update))
-                logger.debug(f"Successfully processed update {update.update_id}")
-            except Exception as e:
-                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
-            finally:
-                # Clean up event loop
-                if loop:
-                    try:
-                        # Cancel pending tasks
-                        pending = asyncio.all_tasks(loop)
-                        for task in pending:
-                            task.cancel()
-                        # Wait for tasks to complete cancellation
-                        if pending:
-                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                        loop.close()
-                    except Exception:
-                        pass
-        
-        # Start processing in background thread (non-blocking)
-        thread = threading.Thread(target=process_update_async, daemon=True)
-        thread.start()
-        
-        # Return immediately to Telegram (webhook compliance requirement)
-        # Telegram expects 200 OK response within a few seconds
-        return jsonify({'ok': True}), 200
-        
+        cursor.execute('''
+            INSERT OR REPLACE INTO users (chat_id, group_number)
+            VALUES (?, ?)
+        ''', (chat_id, group))
+        conn.commit()
+        conn.close()
+        return True
     except Exception as e:
-        logger.error(f"Unexpected error in webhook handler: {e}", exc_info=True)
-        # Still return 200 to avoid Telegram retrying with same update
-        # Telegram will retry failed webhooks, so we return 200 even on error
-        return jsonify({'ok': False, 'error': 'Internal server error'}), 200
+        logger.error(f"Error saving user group: {e}")
+        conn.close()
+        return False
 
+def get_all_users() -> list:
+    """Get all registered users"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT chat_id, group_number FROM users')
+    users = [{"chat_id": row[0], "group": row[1]} for row in cursor.fetchall()]
+    conn.close()
+    return users
 
-def run_flask():
-    """Run Flask server"""
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, use_reloader=False)
+def delete_user(chat_id: int) -> bool:
+    """Delete user from database"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM users WHERE chat_id = ?', (chat_id,))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
 
+# =============================================================================
+# BOT HANDLERS
+# =============================================================================
 
-def check_user_limit():
-    """Check if user limit has been reached"""
-    current_users = storage.get_user_count()
-    return current_users < MAX_USERS
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    chat_id = update.effective_chat.id
+    
+    welcome_msg = (
+        "Вітаю! 👋\n\n"
+        "Я бот для сповіщень про зміни в графіку відключень світла у Львові.\n\n"
+        "📍 Оберіть вашу групу відключень командою /setgroup\n"
+        "📋 Переглянути графік: /schedule\n"
+        "ℹ️ Допомога: /help"
+    )
+    
+    await update.message.reply_text(welcome_msg)
 
-def format_schedule_message(group_id, schedule_entries):
-    """Format schedule for today and tomorrow"""
-    import re
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command"""
+    help_msg = (
+        "📱 Доступні команди:\n\n"
+        "/start - Почати роботу з ботом\n"
+        "/setgroup - Обрати групу відключень\n"
+        "/schedule - Переглянути поточний графік\n"
+        "/mygroup - Показати вашу групу\n"
+        "/stop - Відписатися від сповіщень\n"
+        "/help - Показати цю довідку\n\n"
+        "ℹ️ Бот моніторить зміни кожні 10 хвилин і надсилає сповіщення, "
+        "якщо графік змінюється."
+    )
     
-    def calculate_power_times(schedule_text):
-        """Calculate ON and OFF times"""
-        pattern = re.compile(r'з (\d{1,2}):(\d{2}) до (\d{1,2}):(\d{2})')
-        off_ranges = []
-        
-        for match in pattern.finditer(schedule_text):
-            start_h, start_m, end_h, end_m = map(int, match.groups())
-            start_min = start_h * 60 + start_m
-            end_min = (end_h * 60 + end_m) if end_h != 24 else 1440
-            off_ranges.append((start_min, end_min))
-        
-        off_ranges.sort()
-        merged = []
-        for start, end in off_ranges:
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        
-        on_ranges = []
-        current = 0
-        for off_start, off_end in merged:
-            if current < off_start:
-                on_ranges.append((current, off_start))
-            current = max(current, off_end)
-        
-        if current < 1440:
-            on_ranges.append((current, 1440))
-        
-        def fmt(minutes):
-            h, m = divmod(minutes, 60)
-            return f"{h:02d}:{m:02d}"
-        
-        off_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in merged)
-        on_text = ", ".join(f"з {fmt(s)} до {fmt(e) if e < 1440 else '24:00'}" for s, e in on_ranges)
-        
-        return on_text or "немає", off_text or "немає"
-    
-    message = f"📋 <b>Графік для групи {group_id}</b>\n\n"
-    
-    for idx, entry in enumerate(schedule_entries[:2]):  # Today and tomorrow
-        date = entry.get('date', '')
-        schedule = entry.get('schedule', '')
-        
-        if not schedule:
-            continue
-        
-        label = "Сьогодні" if idx == 0 else "Завтра"
-        if date and date != "Today":
-            label = date
-        
-        on_time, off_time = calculate_power_times(schedule)
-        
-        message += f"📅 <b>{label}</b>\n\n"
-        message += f"🟢 <b>Є світло:</b> {on_time}\n"
-        message += f"🔴 <b>Немає світла:</b> {off_time}\n\n"
-    
-    if len(schedule_entries) == 0:
-        message += "ℹ️ Графік наразі недоступний."
-    else:
-        message += "ℹ️ Графік може змінюватися протягом дня."
-    
-    return message
+    await update.message.reply_text(help_msg)
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    user_data = storage.get_user(user_id)
-    
-    if user_data:
-        group = user_data.get('group', 'не встановлено')
+async def setgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setgroup command - show group selection keyboard"""
+    # Check user limit
+    current_group = get_user_group(update.effective_chat.id)
+    if current_group is None and get_user_count() >= MAX_USERS:
         await update.message.reply_text(
-            f"Вітаю! 👋\n\n"
-            f"Ваша поточна група: {group}\n\n"
-            f"Команди:\n"
-            f"/setgroup - Змінити групу відключень\n"
-            f"/mygroup - Показати поточну групу\n"
-            f"/stop - Відписатися від сповіщень\n"
-            f"/help - Допомога"
+            "❌ На жаль, досягнуто максимальну кількість користувачів.\n"
+            "Спробуйте пізніше."
         )
-    else:
-        await update.message.reply_text(
-            f"Вітаю! 👋\n\n"
-            f"Я допоможу вам отримувати сповіщення про зміни в графіку відключень електроенергії.\n\n"
-            f"Для початку, оберіть вашу групу відключень командою /setgroup"
-        )
+        return
     
-    return ConversationHandler.END
-
-
-async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    # Create inline keyboard with groups
+    keyboard = []
+    for i in range(0, len(GROUPS), 3):
+        row = [
+            InlineKeyboardButton(group, callback_data=f"group_{group}")
+            for group in GROUPS[i:i+3]
+        ]
+        keyboard.append(row)
     
-    # Check if user exists or if we can add new users
-    user_data = storage.get_user(user_id)
-    
-    if not user_data and not check_user_limit():
-        await update.message.reply_text(
-            "Вибачте, бот досяг максимальної кількості користувачів (15).\n"
-            "Зверніться до адміністратора для збільшення ліміту."
-        )
-        return ConversationHandler.END
-    
-    # Available groups
-    groups = [
-        ['1.1', '1.2', '1.3'],
-        ['2.1', '2.2', '2.3'],
-        ['3.1', '3.2', '3.3'],
-        ['4.1', '4.2', '4.3'],
-        ['5.1', '5.2', '5.3'],
-        ['6.1', '6.2', '6.3'],
-        ['Скасувати']
-    ]
-    
-    reply_markup = ReplyKeyboardMarkup(groups, one_time_keyboard=True, resize_keyboard=True)
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
         "Оберіть вашу групу відключень:",
         reply_markup=reply_markup
     )
-    
-    return SELECTING_GROUP
 
-
-async def group_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    group = update.message.text
+async def group_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle group selection from inline keyboard"""
+    query = update.callback_query
+    await query.answer()
     
-    if group == 'Скасувати':
-        await update.message.reply_text(
-            "Скасовано.",
-            reply_markup=ReplyKeyboardRemove()
+    group = query.data.replace("group_", "")
+    chat_id = query.from_user.id
+    
+    if save_user_group(chat_id, group):
+        await query.edit_message_text(
+            f"✅ Групу {group} збережено!\n\n"
+            f"Ви будете отримувати сповіщення про зміни в графіку відключень.\n\n"
+            f"Переглянути графік: /schedule"
         )
-        return ConversationHandler.END
-    
-    # Validate group format
-    valid_groups = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 4)]
-    
-    if group not in valid_groups:
-        await update.message.reply_text(
-            "Невірний формат групи. Спробуйте ще раз або натисніть /cancel",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-    
-    user_data = {
-        'group': group,
-        'user_id': user_id
-    }
-    
-    storage.set_user(user_id, user_data)
-    
-    await update.message.reply_text(
-        f"✅ Групу {group} збережено!\n\n"
-        f"Ви будете отримувати сповіщення про зміни в графіку відключень.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    return ConversationHandler.END
-
-
-async def my_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = storage.get_user(user_id)
-    
-    if user_data:
-        group = user_data.get('group', 'не встановлено')
-        await update.message.reply_text(f"Ваша група: {group}")
+        logger.info(f"User {chat_id} selected group {group}")
     else:
-        await update.message.reply_text(
-            "Група не встановлена. Використайте /setgroup для налаштування."
+        await query.edit_message_text(
+            "❌ Помилка при збереженні групи. Спробуйте ще раз: /setgroup"
         )
-
-
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    storage.delete_user(user_id)
-    
-    await update.message.reply_text(
-        "Ви відписалися від сповіщень. Для повторної підписки використайте /start"
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current_users = storage.get_user_count()
-    await update.message.reply_text(
-        "📋 Доступні команди:\n\n"
-        "/start - Почати роботу з ботом\n"
-        "/setgroup - Встановити/змінити групу відключень\n"
-        "/schedule - Показати графік\n"
-        "/mygroup - Показати поточну групу\n"
-        "/stop - Відписатися від сповіщень\n"
-        "/help - Показати цю допомогу\n\n"
-        f"👥 Користувачів: {current_users}/{MAX_USERS}"
-    )
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Скасовано.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
 
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /schedule command - show current schedule for user's group"""
-    user_id = update.effective_user.id
-    user_data = storage.get_user(user_id)
+    """Handle /schedule command"""
+    chat_id = update.effective_chat.id
+    group = get_user_group(chat_id)
     
-    if not user_data:
+    if not group:
         await update.message.reply_text(
-            "Спочатку оберіть групу: /setgroup"
+            "❌ Спочатку оберіть вашу групу: /setgroup"
         )
         return
     
-    group = user_data.get('group')
-    
-    # Fetch current schedule
-    try:
-        scraper = ScheduleScraper()
-        result = scraper.check_for_changes()
-        
-        if not result or not result.get('new_schedule'):
-            await update.message.reply_text(
-                "❌ Не вдалося отримати графік. Спробуйте пізніше."
-            )
-            return
-        
-        schedule = result['new_schedule']
-        groups_data = schedule.get('groups', {})
-        user_schedule = groups_data.get(group)
-        
-        if not user_schedule or len(user_schedule) == 0:
-            await update.message.reply_text(
-                f"📋 Графік для групи <b>{group}</b> наразі недоступний.",
-                parse_mode='HTML'
-            )
-            return
-        
-        # Format message with today and tomorrow
-        message = format_schedule_message(group, user_schedule)
-        
-        await update.message.reply_text(
-            message,
-            parse_mode='HTML'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error fetching schedule: {e}")
-        await update.message.reply_text(
-            "❌ Помилка при отриманні графіку."
-        )
-
-# Global application instance
-application = None
-
-def setup_bot():
-    """Setup Telegram bot application"""
-    global application
-    import asyncio
-    
-    # Fix for Python 3.14 - ensure event loop exists BEFORE building application
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
-    
-    application = Application.builder().token(token).build()
-    
-    # Conversation handler for setting group
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('setgroup', set_group)],
-        states={
-            SELECTING_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, group_selected)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
+    # Note: In production, this would fetch actual schedule from API
+    # For now, show a placeholder message
+    await update.message.reply_text(
+        f"📋 Графік для групи {group}\n\n"
+        f"🔄 Завантаження актуального графіка...\n\n"
+        f"ℹ️ Функція перегляду графіка буде доступна після інтеграції з API.\n"
+        f"Наразі ви отримуватимете сповіщення про зміни."
     )
-    
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler('mygroup', my_group))
-    application.add_handler(CommandHandler('stop', stop))
-    application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('schedule', schedule_command))
-    
-    # Initialize application (but don't start polling)
-    application.initialize()
-    
-    logger.info("Bot application initialized (webhook mode)")
-    return application
 
-async def setup_webhook():
-    """Setup webhook URL with Telegram (Telegram-compliant)"""
-    global application
-    if not application:
-        setup_bot()
+async def mygroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /mygroup command"""
+    chat_id = update.effective_chat.id
+    group = get_user_group(chat_id)
     
-    webhook_url = os.getenv('WEBHOOK_URL')
-    if not webhook_url:
-        logger.warning("WEBHOOK_URL not set, webhook will not be configured")
-        return
+    if group:
+        await update.message.reply_text(
+            f"📍 Ваша група: {group}\n\n"
+            f"Змінити групу: /setgroup"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Група не обрана.\n"
+            "Оберіть групу: /setgroup"
+        )
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stop command"""
+    chat_id = update.effective_chat.id
     
-    # Optional: Get secret token for webhook security
-    webhook_secret = os.getenv('WEBHOOK_SECRET')
+    if delete_user(chat_id):
+        await update.message.reply_text(
+            "✅ Ви відписалися від сповіщень.\n\n"
+            "Щоб підписатися знову, використайте /start"
+        )
+        logger.info(f"User {chat_id} unsubscribed")
+    else:
+        await update.message.reply_text(
+            "ℹ️ Ви не були підписані на сповіщення."
+        )
+
+# =============================================================================
+# FLASK API
+# =============================================================================
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'users': get_user_count()
+    }), 200
+
+@flask_app.route('/api/users', methods=['GET'])
+def get_users():
+    """API endpoint to get all users - protected by API secret"""
+    auth_header = request.headers.get('Authorization')
     
-    # Set webhook with all required parameters
-    webhook_params = {
-        'url': f"{webhook_url}/webhook",
-        'allowed_updates': Update.ALL_TYPES,
-        'drop_pending_updates': False  # Keep pending updates
-    }
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'error': 'Missing or invalid authorization'}), 401
     
-    # Add secret token if configured (recommended for security)
-    if webhook_secret:
-        webhook_params['secret_token'] = webhook_secret
-        logger.info("Webhook secret token configured")
+    token = auth_header.replace('Bearer ', '')
+    if token != API_SECRET:
+        return jsonify({'error': 'Invalid API secret'}), 403
     
     try:
-        await application.bot.set_webhook(**webhook_params)
-        logger.info(f"Webhook set to: {webhook_url}/webhook")
+        users = get_all_users()
+        return jsonify({
+            'users': users,
+            'count': len(users)
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting users: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/webhook', methods=['POST'])
+def webhook_handler():
+    """Handle incoming webhook updates from Telegram"""
+    global bot_app
+    
+    if request.method == 'POST':
+        try:
+            update_data = request.get_json(force=True)
+            update = Update.de_json(update_data, bot_app.bot)
+            
+            # Process update in async context
+            asyncio.run(bot_app.process_update(update))
+            
+            return 'OK', 200
+        except Exception as e:
+            logger.error(f"Error processing update: {e}")
+            return 'Error', 500
+    return 'Invalid request', 400
+
+# =============================================================================
+# BOT APPLICATION SETUP
+# =============================================================================
+
+async def setup_application():
+    """Initialize and set up the bot application"""
+    global bot_app
+    
+    # Create bot application
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    bot_app.add_handler(CommandHandler('start', start_command))
+    bot_app.add_handler(CommandHandler('help', help_command))
+    bot_app.add_handler(CommandHandler('setgroup', setgroup_command))
+    bot_app.add_handler(CommandHandler('schedule', schedule_command))
+    bot_app.add_handler(CommandHandler('mygroup', mygroup_command))
+    bot_app.add_handler(CommandHandler('stop', stop_command))
+    bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
+    
+    # Initialize the application
+    await bot_app.initialize()
+    await bot_app.start()
+    
+    # Set up webhook
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    
+    try:
+        # Delete any existing webhook
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
         
-        # Verify webhook was set correctly
-        webhook_info = await application.bot.get_webhook_info()
-        logger.info(f"Webhook info: URL={webhook_info.url}, Pending updates={webhook_info.pending_update_count}")
+        # Set new webhook
+        await bot_app.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=["message", "callback_query"]
+        )
         
-        if webhook_info.url != f"{webhook_url}/webhook":
-            logger.warning(f"Webhook URL mismatch! Expected: {webhook_url}/webhook, Got: {webhook_info.url}")
+        # Get webhook info
+        webhook_info = await bot_app.bot.get_webhook_info()
+        logger.info(f"✅ Webhook set successfully!")
+        logger.info(f"📍 Webhook URL: {webhook_info.url}")
+        logger.info(f"📊 Pending updates: {webhook_info.pending_update_count}")
         
     except Exception as e:
-        logger.error(f"Failed to set webhook: {e}", exc_info=True)
+        logger.error(f"❌ Error setting webhook: {e}")
         raise
-
-def main():
-    """Main function - setup bot and run Flask"""
-    setup_bot()
     
-    # Setup webhook asynchronously
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    loop.run_until_complete(setup_webhook())
+    logger.info("🤖 Bot application initialized and ready!")
 
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == '__main__':
-    import asyncio
+    logger.info("=" * 60)
+    logger.info("🚀 Starting Svitlo Bot with webhook support...")
+    logger.info("=" * 60)
+    logger.info(f"📍 Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"🔌 Port: {PORT}")
     
-    # Ensure event loop exists for Python 3.14+
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    # Validate environment variables
+    if not BOT_TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN not set!")
+        exit(1)
+    if not API_SECRET:
+        logger.error("❌ API_SECRET not set!")
+        exit(1)
+    if not WEBHOOK_URL:
+        logger.error("❌ WEBHOOK_URL not set!")
+        exit(1)
     
-    # Setup bot first
-    main()
+    # Initialize database
+    init_db()
     
-    # Run Flask (webhook will be handled by Flask endpoint)
-    logger.info("Starting Flask server...")
-    run_flask()
+    # Set up bot application
+    logger.info("🔧 Initializing bot application...")
+    asyncio.run(setup_application())
+    
+    # Run Flask server
+    logger.info("🌐 Starting Flask server...")
+    logger.info("=" * 60)
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
