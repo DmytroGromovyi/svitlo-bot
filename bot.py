@@ -626,7 +626,7 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             message,
-            parse_mode='MarkdownV2'
+            parse_mode='Markdown'
         )
         
     except Exception as e:
