@@ -400,21 +400,29 @@ async def process_queue_updates():
     """Process updates from the queue"""
     global bot_app, update_queue
     
+    import asyncio
+    
+    logger.info("🔄 Queue processor started")
+    
     while True:
         try:
-            # Get update from queue (blocking)
+            # Check queue with timeout
             if not update_queue.empty():
-                update_data = update_queue.get()
+                update_data = update_queue.get(timeout=1)
+                logger.info(f"📨 Processing update from queue")
+                
                 update = Update.de_json(update_data, bot_app.bot)
                 await bot_app.process_update(update)
+                
                 update_queue.task_done()
+                logger.info(f"✅ Update processed successfully")
+            else:
+                # Small delay when queue is empty
+                await asyncio.sleep(0.1)
+                
         except Exception as e:
-            logger.error(f"Error processing queued update: {e}", exc_info=True)
-        
-        # Small delay to prevent CPU spinning
-        await bot_app.bot.loop.create_task(
-            bot_app.bot.loop.create_future()
-        )
+            logger.error(f"❌ Error processing queued update: {e}", exc_info=True)
+            await asyncio.sleep(0.1)
 
 async def setup_application():
     """Initialize and set up the bot application"""
@@ -474,8 +482,17 @@ def run_bot():
     # Set up and start the bot
     loop.run_until_complete(setup_application())
     
+    # Start queue processor
+    logger.info("🔄 Starting queue processor...")
+    loop.create_task(process_queue_updates())
+    
     # Keep the loop running
-    loop.run_forever()
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    finally:
+        loop.close()
 
 # =============================================================================
 # MAIN
