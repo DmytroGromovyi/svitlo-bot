@@ -263,48 +263,64 @@ def parse_schedule_entries(group_data):
     return today_text, tomorrow_text
 
 def format_schedule_text(schedule_text):
-    """Format schedule text to show BOTH power ON and OFF periods"""
+    """Format schedule text showing derived ON/OFF periods correctly"""
 
     if not schedule_text:
         return "ℹ️ Інформація відсутня"
 
     import re
+    from datetime import time
 
-    # Normalize input
-    text = schedule_text.replace('\r', '').strip()
-
-    # Extract time ranges
-    on_times = re.findall(
-        r'(?:Є світло|є світло|Електроенергія є).*?з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})',
-        text,
-        re.IGNORECASE
+    # Parse OFF ranges
+    off_ranges = re.findall(
+        r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})',
+        schedule_text
     )
 
-    off_times = re.findall(
-        r'(?:Немає світла|немає світла|Електроенергії немає).*?з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})',
-        text,
-        re.IGNORECASE
+    def to_minutes(t):
+        h, m = map(int, t.split(':'))
+        return h * 60 + m
+
+    off_intervals = sorted(
+        [(to_minutes(s), to_minutes(e)) for s, e in off_ranges]
     )
 
-    result_lines = []
+    # Build ON intervals as complement of OFF
+    on_intervals = []
+    last_end = 0
 
-    # 🟢 POWER ON
-    result_lines.append("🟢 *Є світло:*")
-    if on_times:
-        for start, end in on_times:
-            result_lines.append(f"  • {start} — {end}")
+    for start, end in off_intervals:
+        if start > last_end:
+            on_intervals.append((last_end, start))
+        last_end = end
+
+    if last_end < 24 * 60:
+        on_intervals.append((last_end, 24 * 60))
+
+    def fmt(mins):
+        return f"{mins // 60:02d}:{mins % 60:02d}"
+
+    lines = []
+
+    # 🟢 ON
+    lines.append("🟢 *Є світло:*")
+    if on_intervals:
+        for s, e in on_intervals:
+            if s != e:
+                lines.append(f"  • {fmt(s)} — {fmt(e)}")
     else:
-        result_lines.append("  • немає даних")
+        lines.append("  • немає даних")
 
-    # 🔴 POWER OFF
-    result_lines.append("\n🔴 *Немає світла:*")
-    if off_times:
-        for start, end in off_times:
-            result_lines.append(f"  • {start} — {end}")
+    # 🔴 OFF
+    lines.append("\n🔴 *Немає світла:*")
+    if off_intervals:
+        for s, e in off_intervals:
+            lines.append(f"  • {fmt(s)} — {fmt(e)}")
     else:
-        result_lines.append("  • немає даних")
+        lines.append("  • немає даних")
 
-    return "\n".join(result_lines)
+    return "\n".join(lines)
+
 
 def format_notification_message(
     group_number,
