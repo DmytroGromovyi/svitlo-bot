@@ -263,84 +263,90 @@ def parse_schedule_entries(group_data):
     return today_text, tomorrow_text
 
 def format_schedule_text(schedule_text):
-    """Format schedule text to be more readable with emojis"""
-    if not schedule_text:
-        return "Інформація відсутня"
-    
-    # Replace common patterns with emojis and better formatting
-    text = schedule_text
-    
-    # Find time ranges for "є світло" and "немає світла"
-    import re
-    
-    # Pattern: "з XX:XX до YY:YY"
-    has_power_pattern = r'(Є світло|є світло|Електроенергія є)[^\n]*'
-    no_power_pattern = r'(Немає світла|немає світла|Електроенергії немає)[^\n]*'
-    
-    has_power_match = re.search(has_power_pattern, text, re.IGNORECASE)
-    no_power_match = re.search(no_power_pattern, text, re.IGNORECASE)
-    
-    result = ""
-    
-    if has_power_match:
-        has_power_text = has_power_match.group(0)
-        # Extract time ranges
-        times = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', has_power_text)
-        if times:
-            result += "🟢 Є світло:\n"
-            for start, end in times:
-                result += f"   • {start} — {end}\n"
-    
-    if no_power_match:
-        no_power_text = no_power_match.group(0)
-        times = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', no_power_text)
-        if times:
-            if result:
-                result += "\n"
-            result += "🔴 Немає світла:\n"
-            for start, end in times:
-                result += f"   • {start} — {end}\n"
-    
-    # If no pattern matched, return original
-    if not result:
-        return text
-    
-    return result.strip()
+    """Format schedule text to show BOTH power ON and OFF periods"""
 
-def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
-    """Format notification message with changes highlighted"""
-    message = "⚡️ *Оновлення графіку відключень\!*\n\n"
+    if not schedule_text:
+        return "ℹ️ Інформація відсутня"
+
+    import re
+
+    # Normalize input
+    text = schedule_text.replace('\r', '').strip()
+
+    # Extract time ranges
+    on_times = re.findall(
+        r'(?:Є світло|є світло|Електроенергія є).*?з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})',
+        text,
+        re.IGNORECASE
+    )
+
+    off_times = re.findall(
+        r'(?:Немає світла|немає світла|Електроенергії немає).*?з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})',
+        text,
+        re.IGNORECASE
+    )
+
+    result_lines = []
+
+    # 🟢 POWER ON
+    result_lines.append("🟢 *Є світло:*")
+    if on_times:
+        for start, end in on_times:
+            result_lines.append(f"  • {start} — {end}")
+    else:
+        result_lines.append("  • немає даних")
+
+    # 🔴 POWER OFF
+    result_lines.append("\n🔴 *Немає світла:*")
+    if off_times:
+        for start, end in off_times:
+            result_lines.append(f"  • {start} — {end}")
+    else:
+        result_lines.append("  • немає даних")
+
+    return "\n".join(result_lines)
+
+def format_notification_message(
+    group_number,
+    current_today,
+    current_tomorrow,
+    previous_today=None,
+    previous_tomorrow=None
+):
+    """Format notification message with changed hours crossed out"""
+
+    message = "⚡️ *Оновлення графіку відключень!*\n\n"
     message += f"📍 Група: *{group_number}*\n\n"
-    
-    # Today's schedule
+
+    # ===== TODAY =====
     message += "📅 *Сьогодні*\n"
-    
+
     if previous_today and previous_today != current_today:
-        # Show old (strikethrough) and new
-        old_formatted = format_schedule_text(previous_today)
-        # Add strikethrough to old schedule
-        old_lines = old_formatted.split('\n')
-        old_strikethrough = '\n'.join([f"~{line}~" if line.strip() else line for line in old_lines])
-        message += f"{old_strikethrough}\n\n"
-        message += "🔄 *Оновлено:*\n"
-    
+        old_block = format_schedule_text(previous_today)
+        old_lines = old_block.split("\n")
+        message += "\n".join(
+            f"~{line}~" if line.strip() else line for line in old_lines
+        )
+        message += "\n\n🔄 *Оновлено:*\n"
+
     message += format_schedule_text(current_today) + "\n\n"
-    
-    # Tomorrow's schedule
+
+    # ===== TOMORROW =====
     if current_tomorrow:
         message += "📅 *Завтра*\n"
-        
+
         if previous_tomorrow and previous_tomorrow != current_tomorrow:
-            old_formatted = format_schedule_text(previous_tomorrow)
-            old_lines = old_formatted.split('\n')
-            old_strikethrough = '\n'.join([f"~{line}~" if line.strip() else line for line in old_lines])
-            message += f"{old_strikethrough}\n\n"
-            message += "🔄 *Оновлено:*\n"
-        
+            old_block = format_schedule_text(previous_tomorrow)
+            old_lines = old_block.split("\n")
+            message += "\n".join(
+                f"~{line}~" if line.strip() else line for line in old_lines
+            )
+            message += "\n\n🔄 *Оновлено:*\n"
+
         message += format_schedule_text(current_tomorrow) + "\n\n"
-    
-    message += "ℹ️ _Графік може змінюватися протягом дня_"
-    
+
+    message += "ℹ️ _Перекреслено — години, які були змінені_"
+
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
