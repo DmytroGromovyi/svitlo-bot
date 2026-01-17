@@ -67,17 +67,15 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Check if table exists and get its structure
+    # Users table
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
     table_exists = cursor.fetchone() is not None
     
     if table_exists:
-        # Get column names
         cursor.execute("PRAGMA table_info(users)")
         columns = [row[1] for row in cursor.fetchall()]
         logger.info(f"Existing table columns: {columns}")
         
-        # Check if we need to migrate from old schema
         if 'group' in columns and 'group_number' not in columns:
             logger.info("Migrating database: renaming 'group' to 'group_number'")
             cursor.execute('ALTER TABLE users RENAME COLUMN "group" TO group_number')
@@ -94,7 +92,6 @@ def init_db():
             ''')
             conn.commit()
     else:
-        # Create new table
         cursor.execute('''
             CREATE TABLE users (
                 chat_id INTEGER PRIMARY KEY,
@@ -103,6 +100,20 @@ def init_db():
             )
         ''')
         conn.commit()
+    
+    # Schedules table - stores current and previous state for each group
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS schedules (
+            group_number TEXT PRIMARY KEY,
+            today_schedule TEXT,
+            tomorrow_schedule TEXT,
+            previous_today TEXT,
+            previous_tomorrow TEXT,
+            schedule_hash TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
     
     conn.close()
     logger.info("Database initialized")
@@ -162,11 +173,195 @@ def delete_user(chat_id: int) -> bool:
     conn.close()
     return deleted
 
+def get_schedule_from_db(group_number: str) -> Optional[dict]:
+    """Get schedule for a specific group from database"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT today_schedule, tomorrow_schedule, updated_at 
+        FROM schedules 
+        WHERE group_number = ?
+    ''', (group_number,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'today': result[0],
+            'tomorrow': result[1],
+            'updated_at': result[2]
+        }
+    return None
+
+def save_schedule_to_db(group_number: str, today: str, tomorrow: str, schedule_hash: str):
+    """Save schedule to database, keeping previous state"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Get current state to store as previous
+    cursor.execute('''
+        SELECT today_schedule, tomorrow_schedule 
+        FROM schedules 
+        WHERE group_number = ?
+    ''', (group_number,))
+    current = cursor.fetchone()
+    
+    prev_today = current[0] if current else None
+    prev_tomorrow = current[1] if current else None
+    
+    # Insert or update
+    cursor.execute('''
+        INSERT INTO schedules 
+        (group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(group_number) DO UPDATE SET
+            previous_today = schedules.today_schedule,
+            previous_tomorrow = schedules.tomorrow_schedule,
+            today_schedule = excluded.today_schedule,
+            tomorrow_schedule = excluded.tomorrow_schedule,
+            schedule_hash = excluded.schedule_hash,
+            updated_at = CURRENT_TIMESTAMP
+    ''', (group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
+    
+    conn.commit()
+    conn.close()
+
+def get_schedule_hash(group_number: str) -> Optional[str]:
+    """Get stored hash for a group"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT schedule_hash FROM schedules WHERE group_number = ?', (group_number,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
 # =============================================================================
 # SCHEDULE CHECKER & NOTIFIER
 # =============================================================================
 
-async def check_schedule_and_notify():
+def parse_schedule_entries(group_data):
+    """Parse schedule entries to separate today and tomorrow"""
+    today_text = None
+    tomorrow_text = None
+    
+    for entry in group_data:
+        date_name = entry.get('date', '').lower()
+        schedule_text = entry.get('schedule', '')
+        
+        # Identify today vs tomorrow
+        if 'сьогодні' in date_name or 'сього' in date_name:
+            today_text = schedule_text
+        elif 'завтра' in date_name:
+            tomorrow_text = schedule_text
+        elif not today_text:
+            # If no label, first entry is today
+            today_text = schedule_text
+        elif not tomorrow_text:
+            # Second entry is tomorrow
+            tomorrow_text = schedule_text
+    
+    return today_text, tomorrow_text
+
+def format_schedule_text(schedule_text):
+    """Format schedule text to be more readable with emojis"""
+    if not schedule_text:
+        return "Інформація відсутня"
+    
+    # Replace common patterns with emojis and better formatting
+    text = schedule_text
+    
+    # Find time ranges for "є світло" and "немає світла"
+    import re
+    
+    # Pattern: "з XX:XX до YY:YY"
+    has_power_pattern = r'(Є світло|є світло|Електроенергія є)[^\n]*'
+    no_power_pattern = r'(Немає світла|немає світла|Електроенергії немає)[^\n]*'
+    
+    has_power_match = re.search(has_power_pattern, text, re.IGNORECASE)
+    no_power_match = re.search(no_power_pattern, text, re.IGNORECASE)
+    
+    result = ""
+    
+    if has_power_match:
+        has_power_text = has_power_match.group(0)
+        # Extract time ranges
+        times = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', has_power_text)
+        if times:
+            result += "🟢 Є світло:\n"
+            for start, end in times:
+                result += f"   • {start} — {end}\n"
+    
+    if no_power_match:
+        no_power_text = no_power_match.group(0)
+        times = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', no_power_text)
+        if times:
+            if result:
+                result += "\n"
+            result += "🔴 Немає світла:\n"
+            for start, end in times:
+                result += f"   • {start} — {end}\n"
+    
+    # If no pattern matched, return original
+    if not result:
+        return text
+    
+    return result.strip()
+
+def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
+    """Format notification message with changes highlighted"""
+    message = "⚡️ *Оновлення графіку відключень\!*\n\n"
+    message += f"📍 Група: *{group_number}*\n\n"
+    
+    # Today's schedule
+    message += "📅 *Сьогодні*\n"
+    
+    if previous_today and previous_today != current_today:
+        # Show old (strikethrough) and new
+        old_formatted = format_schedule_text(previous_today)
+        # Add strikethrough to old schedule
+        old_lines = old_formatted.split('\n')
+        old_strikethrough = '\n'.join([f"~{line}~" if line.strip() else line for line in old_lines])
+        message += f"{old_strikethrough}\n\n"
+        message += "🔄 *Оновлено:*\n"
+    
+    message += format_schedule_text(current_today) + "\n\n"
+    
+    # Tomorrow's schedule
+    if current_tomorrow:
+        message += "📅 *Завтра*\n"
+        
+        if previous_tomorrow and previous_tomorrow != current_tomorrow:
+            old_formatted = format_schedule_text(previous_tomorrow)
+            old_lines = old_formatted.split('\n')
+            old_strikethrough = '\n'.join([f"~{line}~" if line.strip() else line for line in old_lines])
+            message += f"{old_strikethrough}\n\n"
+            message += "🔄 *Оновлено:*\n"
+        
+        message += format_schedule_text(current_tomorrow) + "\n\n"
+    
+    message += "ℹ️ _Графік може змінюватися протягом дня_"
+    
+    return message
+
+def format_schedule_message(group_number, today, tomorrow, updated_at):
+    """Format regular schedule display message"""
+    message = f"📋 *Графік відключень*\n\n"
+    message += f"📍 Група: *{group_number}*\n\n"
+    
+    if today:
+        message += "📅 *Сьогодні*\n"
+        message += format_schedule_text(today) + "\n\n"
+    
+    if tomorrow:
+        message += "📅 *Завтра*\n"
+        message += format_schedule_text(tomorrow) + "\n\n"
+    
+    if updated_at:
+        message += f"🕐 Оновлено: _{updated_at}_\n"
+    
+    message += "ℹ️ _Графік може змінюватися протягом дня_"
+    
+    return message
     """Check for schedule changes and notify users"""
     global bot_app
     
@@ -176,53 +371,86 @@ async def check_schedule_and_notify():
         # Initialize scraper
         scraper = ScheduleScraper()
         
-        # Check for changes
-        result = scraper.check_for_changes()
-        
-        if not result:
+        # Fetch latest schedule
+        json_content = scraper.fetch_schedule()
+        if not json_content:
             logger.warning("⚠️ Could not fetch schedule")
             return
         
-        if not result['changed']:
+        new_schedule = scraper.parse_schedule(json_content)
+        if not new_schedule:
+            logger.warning("⚠️ Could not parse schedule")
+            return
+        
+        groups = new_schedule.get('groups', {})
+        changed_groups = []
+        
+        # Check each group for changes
+        for group_number, group_data in groups.items():
+            # Parse today and tomorrow
+            today_text, tomorrow_text = parse_schedule_entries(group_data)
+            
+            if not today_text:
+                continue
+            
+            # Calculate hash for this group
+            import hashlib
+            group_hash_data = f"{today_text}|{tomorrow_text or ''}"
+            new_hash = hashlib.sha256(group_hash_data.encode('utf-8')).hexdigest()
+            
+            # Compare with stored hash
+            old_hash = get_schedule_hash(group_number)
+            
+            if new_hash != old_hash:
+                logger.info(f"🔔 Group {group_number} changed!")
+                changed_groups.append(group_number)
+                
+                # Save to database
+                save_schedule_to_db(
+                    group_number=group_number,
+                    today=today_text or '',
+                    tomorrow=tomorrow_text or '',
+                    schedule_hash=new_hash
+                )
+        
+        if not changed_groups:
             logger.info("✅ No changes in schedule")
             return
         
-        # Schedule changed - notify users
-        logger.info("🔔 Schedule changed! Notifying users...")
+        # Notify users
+        logger.info(f"🔔 Schedule changed for groups: {', '.join(changed_groups)}")
         
-        new_schedule = result['new_schedule']
-        groups = new_schedule.get('groups', {})
-        
-        # Get all users
         users = get_all_users()
-        
         if not users:
             logger.info("ℹ️ No users to notify")
             return
         
-        # Send notifications
         notification_count = 0
         
         for user in users:
             chat_id = user['chat_id']
             group = user['group']
             
-            # Check if this group has updates
-            if group not in groups:
+            if group not in changed_groups:
                 continue
             
             try:
+                # Get schedule from DB
+                schedule = get_schedule_from_db(group)
+                if not schedule:
+                    continue
+                
                 # Format message
                 message = f"⚡️ Оновлення графіку відключень!\n\n"
                 message += f"Група: {group}\n\n"
                 
-                group_data = groups[group]
-                for entry in group_data:
-                    date = entry.get('date', 'Невідома дата')
-                    schedule_text = entry.get('schedule', 'Немає даних')
-                    
-                    message += f"📅 {date}\n"
-                    message += f"{schedule_text}\n\n"
+                if schedule['today']:
+                    message += f"📅 Сьогодні\n"
+                    message += f"{schedule['today']}\n\n"
+                
+                if schedule['tomorrow']:
+                    message += f"📅 Завтра\n"
+                    message += f"{schedule['tomorrow']}\n\n"
                 
                 message += f"ℹ️ Графік може змінюватися протягом дня."
                 
@@ -247,21 +475,28 @@ async def check_schedule_and_notify():
         logger.error(f"❌ Error in schedule checker: {e}", exc_info=True)
 
 async def schedule_checker_loop():
-    """Background task that checks schedule every 10 minutes"""
-    logger.info("⏰ Schedule checker started (runs every 10 minutes)")
+    """Background task that checks schedule every 5 minutes"""
+    logger.info("⏰ Schedule checker started (runs every 5 minutes)")
     
     # Wait for bot to be fully initialized
     await asyncio.sleep(10)
     
+    # Run first check immediately
+    logger.info("🔍 Running initial schedule check...")
+    try:
+        await check_schedule_and_notify()
+    except Exception as e:
+        logger.error(f"❌ Error in initial check: {e}", exc_info=True)
+    
     while True:
         try:
+            # Wait 5 minutes
+            logger.info("⏳ Waiting 5 minutes until next check...")
+            await asyncio.sleep(300)  # 300 seconds = 5 minutes
+            
             await check_schedule_and_notify()
         except Exception as e:
             logger.error(f"❌ Error in checker loop: {e}", exc_info=True)
-        
-        # Wait 10 minutes
-        logger.info("⏳ Waiting 10 minutes until next check...")
-        await asyncio.sleep(300)  # 300 seconds = 5 minutes
 
 # =============================================================================
 # BOT HANDLERS
@@ -355,55 +590,40 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Load schedule from storage
+    # Get schedule from database
     try:
-        schedule_path = 'data/schedules.json'
-        if not os.path.exists(schedule_path):
+        schedule = get_schedule_from_db(group)
+        
+        if not schedule:
             await update.message.reply_text(
                 f"📋 Графік для групи {group}\n\n"
                 f"ℹ️ Графік ще не завантажено.\n"
-                f"Зачекайте кілька хвилин - бот автоматично перевіряє оновлення кожні 10 хвилин."
+                f"Зачекайте кілька хвилин - бот автоматично перевіряє оновлення кожні 5 хвилин."
             )
             return
         
-        with open(schedule_path, 'r', encoding='utf-8') as f:
-            schedules = json.load(f)
-        
-        last_schedule = schedules.get('last_schedule', {})
-        groups = last_schedule.get('groups', {})
-        
-        if group not in groups:
-            await update.message.reply_text(
-                f"❌ Графік для групи {group} не знайдено.\n\n"
-                f"Можливо, ця група ще не була оновлена в системі."
-            )
-            return
-        
-        group_data = groups[group]
-        
-        # Format schedule message
-        message = f"📋 Графік відключень для групи {group}\n\n"
-        
-        for entry in group_data:
-            date = entry.get('date', 'Невідома дата')
-            schedule_text = entry.get('schedule', 'Немає даних')
-            
-            message += f"📅 {date}\n"
-            message += f"{schedule_text}\n\n"
-        
-        # Add timestamp
-        last_checked = schedules.get('last_checked', 'Невідомо')
-        if last_checked != 'Невідомо':
+        # Format timestamp
+        updated_at = schedule.get('updated_at', 'Невідомо')
+        if updated_at and updated_at != 'Невідомо':
             try:
-                checked_dt = datetime.fromisoformat(last_checked)
-                last_checked = checked_dt.strftime('%d.%m.%Y %H:%M')
+                from datetime import datetime
+                updated_dt = datetime.strptime(updated_at, '%Y-%m-%d %H:%M:%S')
+                updated_at = updated_dt.strftime('%d.%m.%Y %H:%M')
             except:
                 pass
         
-        message += f"ℹ️ Останнє оновлення: {last_checked}\n"
-        message += f"⚡ Графік може змінюватися протягом дня."
+        # Format message
+        message = format_schedule_message(
+            group_number=group,
+            today=schedule['today'],
+            tomorrow=schedule['tomorrow'],
+            updated_at=updated_at
+        )
         
-        await update.message.reply_text(message)
+        await update.message.reply_text(
+            message,
+            parse_mode='MarkdownV2'
+        )
         
     except Exception as e:
         logger.error(f"Error fetching schedule: {e}", exc_info=True)
