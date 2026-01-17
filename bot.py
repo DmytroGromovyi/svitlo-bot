@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Svitlo Bot - Power Outage Notification Bot with Webhook Support
-This version uses webhooks instead of polling for better efficiency on Fly.io
+This version uses webhooks and runs schedule checking internally
 """
 
 import os
@@ -14,6 +14,7 @@ from pathlib import Path
 from queue import Queue
 from threading import Thread
 from datetime import datetime
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -23,6 +24,11 @@ from telegram.ext import (
     ContextTypes,
 )
 from flask import Flask, request, jsonify
+
+# Import scraper
+import sys
+sys.path.append(os.path.dirname(__file__))
+from scraper import ScheduleScraper
 
 # =============================================================================
 # CONFIGURATION
@@ -155,6 +161,107 @@ def delete_user(chat_id: int) -> bool:
     deleted = cursor.rowcount > 0
     conn.close()
     return deleted
+
+# =============================================================================
+# SCHEDULE CHECKER & NOTIFIER
+# =============================================================================
+
+async def check_schedule_and_notify():
+    """Check for schedule changes and notify users"""
+    global bot_app
+    
+    logger.info("🔍 Checking for schedule changes...")
+    
+    try:
+        # Initialize scraper
+        scraper = ScheduleScraper()
+        
+        # Check for changes
+        result = scraper.check_for_changes()
+        
+        if not result:
+            logger.warning("⚠️ Could not fetch schedule")
+            return
+        
+        if not result['changed']:
+            logger.info("✅ No changes in schedule")
+            return
+        
+        # Schedule changed - notify users
+        logger.info("🔔 Schedule changed! Notifying users...")
+        
+        new_schedule = result['new_schedule']
+        groups = new_schedule.get('groups', {})
+        
+        # Get all users
+        users = get_all_users()
+        
+        if not users:
+            logger.info("ℹ️ No users to notify")
+            return
+        
+        # Send notifications
+        notification_count = 0
+        
+        for user in users:
+            chat_id = user['chat_id']
+            group = user['group']
+            
+            # Check if this group has updates
+            if group not in groups:
+                continue
+            
+            try:
+                # Format message
+                message = f"⚡️ Оновлення графіку відключень!\n\n"
+                message += f"Група: {group}\n\n"
+                
+                group_data = groups[group]
+                for entry in group_data:
+                    date = entry.get('date', 'Невідома дата')
+                    schedule_text = entry.get('schedule', 'Немає даних')
+                    
+                    message += f"📅 {date}\n"
+                    message += f"{schedule_text}\n\n"
+                
+                message += f"ℹ️ Графік може змінюватися протягом дня."
+                
+                # Send notification
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=message
+                )
+                
+                notification_count += 1
+                logger.info(f"📤 Sent notification to user {chat_id} (group {group})")
+                
+                # Rate limiting
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"❌ Error sending notification to {chat_id}: {e}")
+        
+        logger.info(f"✅ Sent {notification_count} notifications")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in schedule checker: {e}", exc_info=True)
+
+async def schedule_checker_loop():
+    """Background task that checks schedule every 10 minutes"""
+    logger.info("⏰ Schedule checker started (runs every 10 minutes)")
+    
+    # Wait for bot to be fully initialized
+    await asyncio.sleep(10)
+    
+    while True:
+        try:
+            await check_schedule_and_notify()
+        except Exception as e:
+            logger.error(f"❌ Error in checker loop: {e}", exc_info=True)
+        
+        # Wait 10 minutes
+        logger.info("⏳ Waiting 10 minutes until next check...")
+        await asyncio.sleep(300)  # 300 seconds = 5 minutes
 
 # =============================================================================
 # BOT HANDLERS
@@ -485,6 +592,10 @@ def run_bot():
     # Start queue processor
     logger.info("🔄 Starting queue processor...")
     loop.create_task(process_queue_updates())
+    
+    # Start schedule checker (runs every 10 minutes)
+    logger.info("⏰ Starting schedule checker...")
+    loop.create_task(schedule_checker_loop())
     
     # Keep the loop running
     try:
