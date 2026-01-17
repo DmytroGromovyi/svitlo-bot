@@ -56,14 +56,44 @@ def init_db():
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            chat_id INTEGER PRIMARY KEY,
-            group_number TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
+    
+    # Check if table exists and get its structure
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    table_exists = cursor.fetchone() is not None
+    
+    if table_exists:
+        # Get column names
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+        logger.info(f"Existing table columns: {columns}")
+        
+        # Check if we need to migrate from old schema
+        if 'group' in columns and 'group_number' not in columns:
+            logger.info("Migrating database: renaming 'group' to 'group_number'")
+            cursor.execute('ALTER TABLE users RENAME COLUMN "group" TO group_number')
+            conn.commit()
+        elif 'group_number' not in columns:
+            logger.warning("Table exists but missing group_number column, recreating table")
+            cursor.execute('DROP TABLE users')
+            cursor.execute('''
+                CREATE TABLE users (
+                    chat_id INTEGER PRIMARY KEY,
+                    group_number TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+    else:
+        # Create new table
+        cursor.execute('''
+            CREATE TABLE users (
+                chat_id INTEGER PRIMARY KEY,
+                group_number TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+    
     conn.close()
     logger.info("Database initialized")
 
