@@ -286,6 +286,11 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
         """Format hours with escaped decimal point for MarkdownV2"""
         return str(hours_float).replace('.', '\\.')
     
+    def fmt_duration(hours_float):
+        """Format duration with all special chars escaped"""
+        hours_str = str(hours_float).replace('.', '\\.')
+        return f"\\({hours_str} год\\)"
+    
     # Compare and format today's schedule
     message += "📅 *Сьогодні*\n\n"
     
@@ -315,7 +320,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     removed_off = [iv for iv in previous_intervals['off'] if iv not in current_intervals['off']]
     for s, e in removed_off:
         dur = e - s
-        message += f"~  • {fmt(s)} — {fmt(e)} ({fmt_hours(dur/60)} год)~\n"
+        message += f"~  • {fmt(s)} — {fmt(e)} {fmt_duration(dur/60)}~\n"
     
     # Show current OFF intervals
     total_off = 0
@@ -324,7 +329,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
         total_off += dur
         is_new = (s, e) not in previous_intervals['off'] if previous_intervals['off'] else True
         prefix = "⚠️ " if is_new and previous_intervals['off'] else ""
-        message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({fmt_hours(dur/60)} год)\n"
+        message += f"  • {prefix}{fmt(s)} — {fmt(e)} {fmt_duration(dur/60)}\n"
     
     if current_intervals['off']:
         message += f"\n⏱ *Загалом відключено:* {fmt_hours(total_off/60)} годин\n"
@@ -361,7 +366,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
         removed_off_tm = [iv for iv in previous_tm_intervals['off'] if iv not in current_tm_intervals['off']]
         for s, e in removed_off_tm:
             dur = e - s
-            message += f"~  • {fmt(s)} — {fmt(e)} ({fmt_hours(dur/60)} год)~\n"
+            message += f"~  • {fmt(s)} — {fmt(e)} {fmt_duration(dur/60)}~\n"
         
         # Show current OFF intervals
         total_off_tm = 0
@@ -370,7 +375,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
             total_off_tm += dur
             is_new = (s, e) not in previous_tm_intervals['off'] if previous_tm_intervals['off'] else True
             prefix = "⚠️ " if is_new and previous_tm_intervals['off'] else ""
-            message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({fmt_hours(dur/60)} год)\n"
+            message += f"  • {prefix}{fmt(s)} — {fmt(e)} {fmt_duration(dur/60)}\n"
         
         if current_tm_intervals['off']:
             message += f"\n⏱ *Загалом відключено:* {fmt_hours(total_off_tm/60)} годин\n\n"
