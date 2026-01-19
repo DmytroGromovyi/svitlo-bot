@@ -421,7 +421,8 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
-    message = f"📋 *Графік відключень*\n\n📍 Група: *{group_number}*\n\n"
+    escaped_group = group_number.replace('.', '\\.')
+    message = f"📋 *Графік відключень*\n\n📍 Група: *{escaped_group}*\n\n"
     if today: message += "📅 *Сьогодні*\n" + format_schedule_text(today) + "\n\n"
     if tomorrow: message += "📅 *Завтра*\n" + format_schedule_text(tomorrow) + "\n\n"
     if updated_at: message += f"🕐 Оновлено: _{updated_at}_\n"
@@ -518,7 +519,9 @@ async def handle_inline_actions(update, context):
         group = get_user_group(query.from_user.id)
         if not group:
             await safe_edit(
+                query,
                 "❌ Спочатку оберіть групу:",
+                parse_mode='Markdown',
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔄 Обрати групу", callback_data="action_setgroup")
                 ]])
@@ -528,6 +531,7 @@ async def handle_inline_actions(update, context):
         s = get_schedule_from_db(group)
         if not s:
             await safe_edit(
+                query,
                 "ℹ️ Завантаження графіку...",
                 reply_markup=get_main_keyboard()
             )
@@ -535,8 +539,9 @@ async def handle_inline_actions(update, context):
         
         msg = format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at'])
         await safe_edit(
+            query,
             msg,
-            parse_mode='Markdown',
+            parse_mode='MarkdownV2',
             reply_markup=get_main_keyboard()
         )
     
@@ -547,6 +552,7 @@ async def handle_inline_actions(update, context):
             for i in range(0, len(GROUPS), 3)
         ]
         await safe_edit(
+            query,
             "Оберіть вашу групу відключень:",
             reply_markup=InlineKeyboardMarkup(kb)
         )
@@ -556,12 +562,14 @@ async def handle_inline_actions(update, context):
         g = get_user_group(query.from_user.id)
         if g:
             await safe_edit(
+                query,
                 f"📍 Ваша група: *{g}*\n\nОберіть дію:",
                 parse_mode='Markdown',
                 reply_markup=get_main_keyboard()
             )
         else:
             await safe_edit(
+                query,
                 "❌ Група не обрана\n\nОберіть дію:",
                 reply_markup=get_main_keyboard()
             )
@@ -591,6 +599,7 @@ async def group_selection(update, context):
     
     if save_user_group(query.from_user.id, group):
         await safe_edit(
+            query,
             f"✅ Групу {group} збережено!\n\nОберіть дію:",
             reply_markup=get_main_keyboard()
         )

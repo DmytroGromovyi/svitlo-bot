@@ -48,7 +48,12 @@ class ScheduleScraper:
             
             data = response.json()
             logger.info(f"✓ Fetched API data successfully")
-            logger.info(f"  API response type: {data.get('@type')}")
+            if isinstance(data, dict):
+                logger.info(f"  API response type: {data.get('@type')}")
+            elif isinstance(data, list):
+                logger.info(f"  API response is a list, length={len(data)}")
+            else:
+                logger.info(f"  API response type: {type(data)}")
             logger.info(f"  Members found: {len(data.get('hydra:member', []))}")
             
             return json.dumps(data, ensure_ascii=False)
