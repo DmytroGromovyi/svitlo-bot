@@ -18,7 +18,8 @@ from threading import Thread
 from datetime import datetime
 import asyncio
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BadRequest
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
