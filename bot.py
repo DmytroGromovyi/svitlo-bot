@@ -245,8 +245,17 @@ def format_schedule_text(schedule_text):
     return "\n".join(lines)
 
 def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
-    """Format notification with strikethrough ONLY for changed parts"""
-    message = "⚡️ *Оновлення графіку відключень!*\n\n"
+    """Format notification with strikethrough ONLY for changed parts - MarkdownV2 compatible"""
+    
+    # Helper to escape special MarkdownV2 characters
+    def escape_md(text):
+        """Escape special characters for MarkdownV2"""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+    
+    message = "⚡️ *Оновлення графіку відключень\\!*\n\n"
     message += f"📍 Група: *{group_number}*\n\n"
     
     # Helper function to extract time intervals
@@ -307,7 +316,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     removed_off = [iv for iv in previous_intervals['off'] if iv not in current_intervals['off']]
     for s, e in removed_off:
         dur = e - s
-        message += f"~  • {fmt(s)} — {fmt(e)} ({dur/60:.1f} год)~\n"
+        message += f"~  • {fmt(s)} — {fmt(e)} \\({dur/60:.1f} год\\)~\n"
     
     # Show current OFF intervals
     total_off = 0
@@ -316,7 +325,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
         total_off += dur
         is_new = (s, e) not in previous_intervals['off'] if previous_intervals['off'] else True
         prefix = "⚠️ " if is_new and previous_intervals['off'] else ""
-        message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({dur/60:.1f} год)\n"
+        message += f"  • {prefix}{fmt(s)} — {fmt(e)} \\({dur/60:.1f} год\\)\n"
     
     if current_intervals['off']:
         message += f"\n⏱ *Загалом відключено:* {total_off/60:.1f} годин\n"
@@ -353,7 +362,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
         removed_off_tm = [iv for iv in previous_tm_intervals['off'] if iv not in current_tm_intervals['off']]
         for s, e in removed_off_tm:
             dur = e - s
-            message += f"~  • {fmt(s)} — {fmt(e)} ({dur/60:.1f} год)~\n"
+            message += f"~  • {fmt(s)} — {fmt(e)} \\({dur/60:.1f} год\\)~\n"
         
         # Show current OFF intervals
         total_off_tm = 0
@@ -362,7 +371,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
             total_off_tm += dur
             is_new = (s, e) not in previous_tm_intervals['off'] if previous_tm_intervals['off'] else True
             prefix = "⚠️ " if is_new and previous_tm_intervals['off'] else ""
-            message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({dur/60:.1f} год)\n"
+            message += f"  • {prefix}{fmt(s)} — {fmt(e)} \\({dur/60:.1f} год\\)\n"
         
         if current_tm_intervals['off']:
             message += f"\n⏱ *Загалом відключено:* {total_off_tm/60:.1f} годин\n\n"
@@ -436,7 +445,7 @@ async def check_schedule_and_notify():
                         await bot_app.bot.send_message(
                             chat_id=user['chat_id'], 
                             text=msg, 
-                            parse_mode='Markdown'
+                            parse_mode='MarkdownV2'
                         )
                         await asyncio.sleep(0.5)
                         
