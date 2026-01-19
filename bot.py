@@ -421,7 +421,10 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
-    escaped_group = group_number.replace('.', '\\.')
+    if markdown_v2:
+        escaped_group = group_number.replace('.', '\\.')
+    else:
+        escaped_group = group_number  # no escaping for regular Markdown
     message = f"📋 *Графік відключень*\n\n📍 Група: *{escaped_group}*\n\n"
     if today: message += "📅 *Сьогодні*\n" + format_schedule_text(today) + "\n\n"
     if tomorrow: message += "📅 *Завтра*\n" + format_schedule_text(tomorrow) + "\n\n"
