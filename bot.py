@@ -247,8 +247,11 @@ def format_schedule_text(schedule_text):
 def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
     """Format notification with strikethrough ONLY for changed parts - MarkdownV2 compatible"""
     
+    # Escape the group number dots
+    escaped_group = group_number.replace('.', '\\.')
+    
     message = "⚡️ *Оновлення графіку відключень\\!*\n\n"
-    message += f"📍 Група: *{group_number}*\n\n"
+    message += f"📍 Група: *{escaped_group}*\n\n"
     
     # Helper function to extract time intervals
     def extract_intervals(schedule_text):
