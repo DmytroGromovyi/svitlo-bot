@@ -296,7 +296,7 @@ def format_notification_message(group_number, current_today, current_tomorrow, p
     # Show current ON intervals
     for s, e in current_intervals['on']:
         if s != e:
-            is_new = iv not in previous_intervals['on'] if previous_intervals['on'] else True
+            is_new = (s, e) not in previous_intervals['on'] if previous_intervals['on'] else True
             prefix = "✨ " if is_new and previous_intervals['on'] else ""
             message += f"  • {prefix}{fmt(s)} — {fmt(e)}\n"
     
