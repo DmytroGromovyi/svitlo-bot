@@ -245,20 +245,34 @@ def format_schedule_text(schedule_text):
     return "\n".join(lines)
 
 def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
+    """Format notification with strikethrough for changed schedules"""
     message = "⚡️ *Оновлення графіку відключень!*\n\n"
     message += f"📍 Група: *{group_number}*\n\n"
+    
+    # Today's schedule
     message += "📅 *Сьогодні*\n"
+    
+    # Show old schedule with strikethrough if it changed
     if previous_today and previous_today != current_today:
-        old_lines = format_schedule_text(previous_today).split("\n")
-        message += "\n".join(f"~{line}~" if line.strip() else line for line in old_lines) + "\n\n🔄 *Оновлено:*\n"
+        message += "~" + format_schedule_text(previous_today).replace("\n", "~\n~") + "~\n\n"
+        message += "🔄 *Оновлено:*\n"
+    
+    # Show current schedule
     message += format_schedule_text(current_today) + "\n\n"
+    
+    # Tomorrow's schedule (if available)
     if current_tomorrow:
         message += "📅 *Завтра*\n"
+        
+        # Show old schedule with strikethrough if it changed
         if previous_tomorrow and previous_tomorrow != current_tomorrow:
-            old_lines = format_schedule_text(previous_tomorrow).split("\n")
-            message += "\n".join(f"~{line}~" if line.strip() else line for line in old_lines) + "\n\n🔄 *Оновлено:*\n"
+            message += "~" + format_schedule_text(previous_tomorrow).replace("\n", "~\n~") + "~\n\n"
+            message += "🔄 *Оновлено:*\n"
+        
+        # Show current schedule
         message += format_schedule_text(current_tomorrow) + "\n\n"
-    message += "ℹ️ _Перекреслено — години, які були змінені_"
+    
+    message += "ℹ️ _Перекреслено — попередній графік_"
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
@@ -284,10 +298,13 @@ async def check_schedule_and_notify():
         
         groups_data = new_schedule.get('groups', {})
         changed_groups = []
+        
         for g_num, g_data in groups_data.items():
             t_text, tm_text = parse_schedule_entries(g_data)
             if not t_text: continue
+            
             new_hash = hashlib.sha256(f"{t_text}|{tm_text or ''}".encode('utf-8')).hexdigest()
+            
             if new_hash != get_schedule_hash(g_num):
                 changed_groups.append(g_num)
                 save_schedule_to_db(g_num, t_text or '', tm_text or '', new_hash)
@@ -297,12 +314,42 @@ async def check_schedule_and_notify():
         for user in get_all_users():
             if user['group'] in changed_groups:
                 try:
-                    s = get_schedule_from_db(user['group'])
-                    msg = format_notification_message(user['group'], s['today'], s['tomorrow'])
-                    await bot_app.bot.send_message(chat_id=user['chat_id'], text=msg, parse_mode='Markdown')
-                    await asyncio.sleep(0.5)
-                except Exception as e: logger.error(f"Notify error {user['chat_id']}: {e}")
-    except Exception as e: logger.error(f"Checker error: {e}", exc_info=True)
+                    # Get current AND previous schedules
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT today_schedule, tomorrow_schedule, 
+                               previous_today, previous_tomorrow
+                        FROM schedules 
+                        WHERE group_number = ?
+                    ''', (user['group'],))
+                    result = cursor.fetchone()
+                    conn.close()
+                    
+                    if result:
+                        current_today, current_tomorrow, prev_today, prev_tomorrow = result
+                        
+                        # Format message with previous schedules for strikethrough
+                        msg = format_notification_message(
+                            user['group'], 
+                            current_today, 
+                            current_tomorrow,
+                            prev_today,  # Previous today
+                            prev_tomorrow  # Previous tomorrow
+                        )
+                        
+                        await bot_app.bot.send_message(
+                            chat_id=user['chat_id'], 
+                            text=msg, 
+                            parse_mode='Markdown'
+                        )
+                        await asyncio.sleep(0.5)
+                        
+                except Exception as e: 
+                    logger.error(f"Notify error {user['chat_id']}: {e}")
+                    
+    except Exception as e: 
+        logger.error(f"Checker error: {e}", exc_info=True)
 
 async def schedule_checker_loop():
     await asyncio.sleep(10)
