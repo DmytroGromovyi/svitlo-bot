@@ -72,7 +72,7 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-async def safe_edit(query, *, text, parse_mode=None, reply_markup=None):
+async def safe_edit(query, text, parse_mode=None, reply_markup=None):
     try:
         await query.edit_message_text(
             text=text,
