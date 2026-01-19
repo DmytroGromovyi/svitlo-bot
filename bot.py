@@ -85,6 +85,12 @@ async def safe_edit(query, *, text, parse_mode=None, reply_markup=None):
         else:
             raise
 
+async def error_handler(update, context):
+    err = context.error
+    if isinstance(err, BadRequest) and "Message is not modified" in str(err):
+        return
+    logger.error("Unhandled Telegram error", exc_info=err)
+
 # =============================================================================
 # DATABASE FUNCTIONS
 # =============================================================================
@@ -682,6 +688,9 @@ async def setup_application():
     # Add handlers for inline buttons
     bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
     bot_app.add_handler(CallbackQueryHandler(handle_inline_actions, pattern='^action_'))
+
+    # Add error handler
+    bot_app.add_error_handler(error_handler)
 
     await bot_app.initialize()
     await bot_app.start()
