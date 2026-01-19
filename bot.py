@@ -245,34 +245,129 @@ def format_schedule_text(schedule_text):
     return "\n".join(lines)
 
 def format_notification_message(group_number, current_today, current_tomorrow, previous_today=None, previous_tomorrow=None):
-    """Format notification with strikethrough for changed schedules"""
+    """Format notification with strikethrough ONLY for changed parts"""
     message = "⚡️ *Оновлення графіку відключень!*\n\n"
     message += f"📍 Група: *{group_number}*\n\n"
     
-    # Today's schedule
-    message += "📅 *Сьогодні*\n"
+    # Helper function to extract time intervals
+    def extract_intervals(schedule_text):
+        if not schedule_text:
+            return {'on': [], 'off': []}
+        
+        off_ranges = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', schedule_text)
+        
+        def to_minutes(t):
+            h, m = map(int, t.split(':'))
+            return h * 60 + m
+        
+        off_intervals = sorted([(to_minutes(s), to_minutes(e)) for s, e in off_ranges])
+        
+        # Calculate ON intervals
+        on_intervals = []
+        last_end = 0
+        for start, end in off_intervals:
+            if start > last_end:
+                on_intervals.append((last_end, start))
+            last_end = end
+        if last_end < 1440:
+            on_intervals.append((last_end, 1440))
+        
+        return {'on': on_intervals, 'off': off_intervals}
     
-    # Show old schedule with strikethrough if it changed
-    if previous_today and previous_today != current_today:
-        message += "~" + format_schedule_text(previous_today).replace("\n", "~\n~") + "~\n\n"
-        message += "🔄 *Оновлено:*\n"
+    def fmt(mins):
+        if mins >= 1440: return "24:00"
+        return f"{mins // 60:02d}:{mins % 60:02d}"
     
-    # Show current schedule
-    message += format_schedule_text(current_today) + "\n\n"
+    # Compare and format today's schedule
+    message += "📅 *Сьогодні*\n\n"
+    
+    current_intervals = extract_intervals(current_today)
+    previous_intervals = extract_intervals(previous_today) if previous_today else {'on': [], 'off': []}
+    
+    # Power ON times
+    message += "🟢 *Є світло:*\n"
+    
+    # Show removed ON intervals (strikethrough)
+    removed_on = [iv for iv in previous_intervals['on'] if iv not in current_intervals['on']]
+    for s, e in removed_on:
+        if s != e:
+            message += f"~  • {fmt(s)} — {fmt(e)}~\n"
+    
+    # Show current ON intervals
+    for s, e in current_intervals['on']:
+        if s != e:
+            is_new = iv not in previous_intervals['on'] if previous_intervals['on'] else True
+            prefix = "✨ " if is_new and previous_intervals['on'] else ""
+            message += f"  • {prefix}{fmt(s)} — {fmt(e)}\n"
+    
+    # Power OFF times
+    message += "\n🔴 *Немає світла:*\n"
+    
+    # Show removed OFF intervals (strikethrough)
+    removed_off = [iv for iv in previous_intervals['off'] if iv not in current_intervals['off']]
+    for s, e in removed_off:
+        dur = e - s
+        message += f"~  • {fmt(s)} — {fmt(e)} ({dur/60:.1f} год)~\n"
+    
+    # Show current OFF intervals
+    total_off = 0
+    for s, e in current_intervals['off']:
+        dur = e - s
+        total_off += dur
+        is_new = (s, e) not in previous_intervals['off'] if previous_intervals['off'] else True
+        prefix = "⚠️ " if is_new and previous_intervals['off'] else ""
+        message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({dur/60:.1f} год)\n"
+    
+    if current_intervals['off']:
+        message += f"\n⏱ *Загалом відключено:* {total_off/60:.1f} годин\n"
+    
+    message += "\n"
     
     # Tomorrow's schedule (if available)
     if current_tomorrow:
-        message += "📅 *Завтра*\n"
+        message += "📅 *Завтра*\n\n"
         
-        # Show old schedule with strikethrough if it changed
-        if previous_tomorrow and previous_tomorrow != current_tomorrow:
-            message += "~" + format_schedule_text(previous_tomorrow).replace("\n", "~\n~") + "~\n\n"
-            message += "🔄 *Оновлено:*\n"
+        current_tm_intervals = extract_intervals(current_tomorrow)
+        previous_tm_intervals = extract_intervals(previous_tomorrow) if previous_tomorrow else {'on': [], 'off': []}
         
-        # Show current schedule
-        message += format_schedule_text(current_tomorrow) + "\n\n"
+        # Power ON times
+        message += "🟢 *Є світло:*\n"
+        
+        # Show removed ON intervals
+        removed_on_tm = [iv for iv in previous_tm_intervals['on'] if iv not in current_tm_intervals['on']]
+        for s, e in removed_on_tm:
+            if s != e:
+                message += f"~  • {fmt(s)} — {fmt(e)}~\n"
+        
+        # Show current ON intervals
+        for s, e in current_tm_intervals['on']:
+            if s != e:
+                is_new = (s, e) not in previous_tm_intervals['on'] if previous_tm_intervals['on'] else True
+                prefix = "✨ " if is_new and previous_tm_intervals['on'] else ""
+                message += f"  • {prefix}{fmt(s)} — {fmt(e)}\n"
+        
+        # Power OFF times
+        message += "\n🔴 *Немає світла:*\n"
+        
+        # Show removed OFF intervals
+        removed_off_tm = [iv for iv in previous_tm_intervals['off'] if iv not in current_tm_intervals['off']]
+        for s, e in removed_off_tm:
+            dur = e - s
+            message += f"~  • {fmt(s)} — {fmt(e)} ({dur/60:.1f} год)~\n"
+        
+        # Show current OFF intervals
+        total_off_tm = 0
+        for s, e in current_tm_intervals['off']:
+            dur = e - s
+            total_off_tm += dur
+            is_new = (s, e) not in previous_tm_intervals['off'] if previous_tm_intervals['off'] else True
+            prefix = "⚠️ " if is_new and previous_tm_intervals['off'] else ""
+            message += f"  • {prefix}{fmt(s)} — {fmt(e)} ({dur/60:.1f} год)\n"
+        
+        if current_tm_intervals['off']:
+            message += f"\n⏱ *Загалом відключено:* {total_off_tm/60:.1f} годин\n\n"
     
-    message += "ℹ️ _Перекреслено — попередній графік_"
+    message += "ℹ️ _~Перекреслено~ — видалено • ✨/⚠️ — додано_"
     return message
 
 def format_schedule_message(group_number, today, tomorrow, updated_at):
