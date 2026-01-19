@@ -55,6 +55,23 @@ bot_app = None
 update_queue = Queue()
 
 # =============================================================================
+# INLINE MENU HELPER FUNCTIONS
+# =============================================================================
+
+def get_main_keyboard():
+    """Get the main inline keyboard with common actions"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 Графік", callback_data="action_schedule"),
+            InlineKeyboardButton("🔄 Змінити групу", callback_data="action_setgroup")
+        ],
+        [
+            InlineKeyboardButton("ℹ️ Моя група", callback_data="action_mygroup")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# =============================================================================
 # DATABASE FUNCTIONS
 # =============================================================================
 
@@ -469,8 +486,76 @@ async def schedule_checker_loop():
 # TELEGRAM HANDLERS
 # =============================================================================
 
+async def handle_inline_actions(update, context):
+    """Handle inline keyboard button clicks"""
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data
+    
+    if action == "action_schedule":
+        # Show schedule
+        group = get_user_group(query.from_user.id)
+        if not group:
+            await query.edit_message_text(
+                "❌ Спочатку оберіть групу:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 Обрати групу", callback_data="action_setgroup")
+                ]])
+            )
+            return
+        
+        s = get_schedule_from_db(group)
+        if not s:
+            await query.edit_message_text(
+                "ℹ️ Завантаження графіку...",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        msg = format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at'])
+        await query.edit_message_text(
+            msg,
+            parse_mode='Markdown',
+            reply_markup=get_main_keyboard()
+        )
+    
+    elif action == "action_setgroup":
+        # Show group selection
+        kb = [
+            [InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]]
+            for i in range(0, len(GROUPS), 3)
+        ]
+        await query.edit_message_text(
+            "Оберіть вашу групу відключень:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    
+    elif action == "action_mygroup":
+        # Show current group
+        g = get_user_group(query.from_user.id)
+        if g:
+            await query.edit_message_text(
+                f"📍 Ваша група: *{g}*\n\nОберіть дію:",
+                parse_mode='Markdown',
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Група не обрана\n\nОберіть дію:",
+                reply_markup=get_main_keyboard()
+            )
+
 async def start_command(update, context):
-    await update.message.reply_text("Вітаю! 👋\n📍 Оберіть групу: /setgroup\n📋 Графік: /schedule")
+    welcome_text = (
+        "Вітаю! 👋\n\n"
+        "Я допоможу відстежувати графік відключень світла.\n\n"
+        "Оберіть дію:"
+    )
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=get_main_keyboard()
+    )
 
 async def setgroup_command(update, context):
     if get_user_group(update.effective_chat.id) is None and get_user_count() >= MAX_USERS:
@@ -483,26 +568,56 @@ async def group_selection(update, context):
     query = update.callback_query
     await query.answer()
     group = query.data.replace("group_", "")
+    
     if save_user_group(query.from_user.id, group):
-        await query.edit_message_text(f"✅ Групу {group} збережено! /schedule")
+        await query.edit_message_text(
+            f"✅ Групу {group} збережено!\n\nОберіть дію:",
+            reply_markup=get_main_keyboard()
+        )
 
 async def schedule_command(update, context):
     group = get_user_group(update.effective_chat.id)
-    if not group: 
-        await update.message.reply_text("❌ /setgroup first")
+    if not group:
+        await update.message.reply_text(
+            "❌ Спочатку оберіть групу:",
+            reply_markup=get_main_keyboard()
+        )
         return
+    
     s = get_schedule_from_db(group)
     if not s:
-        await update.message.reply_text("ℹ️ Loading schedule...")
+        await update.message.reply_text(
+            "ℹ️ Завантаження графіку...",
+            reply_markup=get_main_keyboard()
+        )
         return
-    await update.message.reply_text(format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']), parse_mode='Markdown')
+    
+    await update.message.reply_text(
+        format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']),
+        parse_mode='Markdown',
+        reply_markup=get_main_keyboard()
+    )
 
 async def mygroup_command(update, context):
     g = get_user_group(update.effective_chat.id)
-    await update.message.reply_text(f"📍 Група: {g}" if g else "❌ Не обрана")
+    text = f"📍 Ваша група: *{g}*" if g else "❌ Група не обрана"
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=get_main_keyboard()
+    )
 
 async def stop_command(update, context):
-    if delete_user(update.effective_chat.id): await update.message.reply_text("✅ Відписано.")
+    """Unsubscribe user from notifications"""
+    if delete_user(update.effective_chat.id):
+        await update.message.reply_text(
+            "✅ Ви відписані від сповіщень.\n\n"
+            "Щоб підписатись знову, натисніть /start"
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ Ви не були підписані на сповіщення."
+        )
 
 # =============================================================================
 # FLASK API ROUTES (RESTORED)
@@ -549,7 +664,11 @@ async def setup_application():
     bot_app.add_handler(CommandHandler('schedule', schedule_command))
     bot_app.add_handler(CommandHandler('mygroup', mygroup_command))
     bot_app.add_handler(CommandHandler('stop', stop_command))
+
+    # Add handlers for inline buttons
     bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
+    bot_app.add_handler(CallbackQueryHandler(handle_inline_actions, pattern='^action_'))
+
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
