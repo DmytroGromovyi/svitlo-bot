@@ -18,7 +18,7 @@ from threading import Thread
 from datetime import datetime
 import asyncio
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -70,6 +70,19 @@ def get_main_keyboard():
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+async def safe_edit(query, *, text, parse_mode=None, reply_markup=None):
+    try:
+        await query.edit_message_text(
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            logger.debug("Telegram edit skipped (no changes)")
+        else:
+            raise
 
 # =============================================================================
 # DATABASE FUNCTIONS
@@ -497,7 +510,7 @@ async def handle_inline_actions(update, context):
         # Show schedule
         group = get_user_group(query.from_user.id)
         if not group:
-            await query.edit_message_text(
+            await safe_edit(
                 "❌ Спочатку оберіть групу:",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔄 Обрати групу", callback_data="action_setgroup")
@@ -507,14 +520,14 @@ async def handle_inline_actions(update, context):
         
         s = get_schedule_from_db(group)
         if not s:
-            await query.edit_message_text(
+            await safe_edit(
                 "ℹ️ Завантаження графіку...",
                 reply_markup=get_main_keyboard()
             )
             return
         
         msg = format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at'])
-        await query.edit_message_text(
+        await safe_edit(
             msg,
             parse_mode='Markdown',
             reply_markup=get_main_keyboard()
@@ -526,7 +539,7 @@ async def handle_inline_actions(update, context):
             [InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]]
             for i in range(0, len(GROUPS), 3)
         ]
-        await query.edit_message_text(
+        await safe_edit(
             "Оберіть вашу групу відключень:",
             reply_markup=InlineKeyboardMarkup(kb)
         )
@@ -535,13 +548,13 @@ async def handle_inline_actions(update, context):
         # Show current group
         g = get_user_group(query.from_user.id)
         if g:
-            await query.edit_message_text(
+            await safe_edit(
                 f"📍 Ваша група: *{g}*\n\nОберіть дію:",
                 parse_mode='Markdown',
                 reply_markup=get_main_keyboard()
             )
         else:
-            await query.edit_message_text(
+            await safe_edit(
                 "❌ Група не обрана\n\nОберіть дію:",
                 reply_markup=get_main_keyboard()
             )
@@ -570,7 +583,7 @@ async def group_selection(update, context):
     group = query.data.replace("group_", "")
     
     if save_user_group(query.from_user.id, group):
-        await query.edit_message_text(
+        await safe_edit(
             f"✅ Групу {group} збережено!\n\nОберіть дію:",
             reply_markup=get_main_keyboard()
         )
