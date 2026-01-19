@@ -541,7 +541,7 @@ async def handle_inline_actions(update, context):
         await safe_edit(
             query,
             msg,
-            parse_mode='MarkdownV2',
+            parse_mode='Markdown',
             reply_markup=get_main_keyboard()
         )
     
