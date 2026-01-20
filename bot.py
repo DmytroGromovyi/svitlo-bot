@@ -381,10 +381,15 @@ async def check_and_notify():
 
 async def checker_loop():
     """Background loop to check schedules"""
-    await asyncio.sleep(10)
+    # Fetch schedules immediately on startup
+    logger.info("Fetching initial schedules...")
+    await check_and_notify()
+    logger.info("Initial fetch complete")
+    
+    # Then continue with regular interval
     while True:
-        await check_and_notify()
         await asyncio.sleep(300)
+        await check_and_notify()
 
 # =============================================================================
 # TELEGRAM HANDLERS
