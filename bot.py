@@ -18,9 +18,9 @@ from threading import Thread
 from datetime import datetime
 import asyncio
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import BadRequest
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request, jsonify
 
 import sys
@@ -56,6 +56,14 @@ def get_main_keyboard():
          InlineKeyboardButton("🔄 Змінити групу", callback_data="action_setgroup")],
         [InlineKeyboardButton("ℹ️ Моя група", callback_data="action_mygroup")]
     ])
+
+def get_reply_keyboard():
+    """Get persistent reply keyboard that's always visible"""
+    keyboard = [
+        [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Моя група")],
+        [KeyboardButton("🔄 Змінити групу")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def safe_edit(query, text, parse_mode=None, reply_markup=None):
     try:
@@ -475,11 +483,14 @@ async def handle_inline_actions(update, context):
         await safe_edit(query, text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
 async def start_command(update, context):
-    await update.message.reply_text("Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\nОберіть дію:", reply_markup=get_main_keyboard())
+    await update.message.reply_text(
+        "Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\nОберіть дію:",
+        reply_markup=get_reply_keyboard()
+    )
 
 async def setgroup_command(update, context):
     if get_user_group(update.effective_chat.id) is None and get_user_count() >= MAX_USERS:
-        await update.message.reply_text("❌ Ліміт користувачів.")
+        await update.message.reply_text("❌ Ліміт користувачів.", reply_markup=get_reply_keyboard())
         return
     kb = [[InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
     await update.message.reply_text("Оберіть групу:", reply_markup=InlineKeyboardMarkup(kb))
@@ -491,22 +502,46 @@ async def group_selection(update, context):
     if save_user_group(query.from_user.id, group):
         await safe_edit(query, f"✅ Групу {group} збережено!\n\nОберіть дію:", reply_markup=get_main_keyboard())
 
+async def handle_text_messages(update, context):
+    """Handle reply keyboard button presses"""
+    text = update.message.text
+    
+    if text == "📋 Графік":
+        await schedule_command(update, context)
+    elif text == "ℹ️ Моя група":
+        await mygroup_command(update, context)
+    elif text == "🔄 Змінити групу":
+        await setgroup_command(update, context)
+
 async def schedule_command(update, context):
     group = get_user_group(update.effective_chat.id)
     if not group:
-        await update.message.reply_text("❌ Спочатку оберіть групу:", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "❌ Спочатку оберіть групу:",
+            reply_markup=get_reply_keyboard()
+        )
         return
     s = get_schedule_from_db(group)
     if not s:
-        await update.message.reply_text("ℹ️ Завантаження графіку...", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "ℹ️ Завантаження графіку...",
+            reply_markup=get_reply_keyboard()
+        )
         return
-    await update.message.reply_text(format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']), 
-                                   parse_mode='Markdown', reply_markup=get_main_keyboard())
+    await update.message.reply_text(
+        format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']), 
+        parse_mode='Markdown',
+        reply_markup=get_reply_keyboard()
+    )
 
 async def mygroup_command(update, context):
     g = get_user_group(update.effective_chat.id)
     text = f"📍 Ваша група: *{g}*" if g else "❌ Група не обрана"
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_keyboard())
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=get_reply_keyboard()
+    )
 
 async def stop_command(update, context):
     if delete_user(update.effective_chat.id):
@@ -562,6 +597,7 @@ async def setup_application():
     bot_app.add_handler(CommandHandler('stop', stop_command))
     bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
     bot_app.add_handler(CallbackQueryHandler(handle_inline_actions, pattern='^action_'))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     bot_app.add_error_handler(error_handler)
 
     await bot_app.initialize()
