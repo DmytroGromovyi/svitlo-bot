@@ -44,6 +44,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 bot_app = None
+bot_loop = None  # Store reference to bot's event loop
 update_queue = Queue()
 
 # =============================================================================
@@ -418,6 +419,30 @@ def format_notification(group, curr_today, curr_tomorrow, prev_today=None, prev_
 # BACKGROUND CHECKER
 # =============================================================================
 
+async def broadcast_message(message, parse_mode=None):
+    """Broadcast a message to all users"""
+    users = get_all_users()
+    success_count = 0
+    failed_count = 0
+    
+    logger.info(f"Starting broadcast to {len(users)} users...")
+    
+    for user in users:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=user['chat_id'],
+                text=message,
+                parse_mode=parse_mode
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)  # Rate limiting
+        except Exception as e:
+            logger.error(f"Broadcast failed for user {user['chat_id']}: {e}")
+            failed_count += 1
+    
+    logger.info(f"Broadcast complete: {success_count} sent, {failed_count} failed")
+    return success_count, failed_count
+
 async def check_and_notify():
     """Check for schedule updates and notify users"""
     try:
@@ -763,6 +788,41 @@ def webhook():
     update_queue.put(request.get_json(force=True))
     return 'OK'
 
+@flask_app.route('/api/broadcast', methods=['POST'])
+def api_broadcast():
+    """Broadcast a message to all users"""
+    auth = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if auth != API_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return jsonify({'error': 'Missing message field'}), 400
+    
+    message = data['message']
+    parse_mode = data.get('parse_mode', 'Markdown')  # Default to Markdown
+    
+    # Validate parse_mode
+    if parse_mode not in ['Markdown', 'MarkdownV2', 'HTML', None]:
+        return jsonify({'error': 'Invalid parse_mode. Use: Markdown, MarkdownV2, HTML, or null'}), 400
+    
+    # Queue the broadcast task using the bot's event loop
+    if bot_loop is None:
+        return jsonify({'error': 'Bot not ready'}), 503
+    
+    asyncio.run_coroutine_threadsafe(
+        broadcast_message(message, parse_mode),
+        bot_loop
+    )
+    
+    user_count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
+    
+    return jsonify({
+        'status': 'queued',
+        'message': 'Broadcast queued successfully',
+        'target_users': user_count
+    })
+
 # =============================================================================
 # APP SETUP
 # =============================================================================
@@ -802,12 +862,21 @@ async def setup():
 
 def run_bot():
     """Run bot in separate thread"""
+    global bot_loop
     loop = asyncio.new_event_loop()
+    bot_loop = loop  # Store reference
     asyncio.set_event_loop(loop)
     loop.run_until_complete(setup())
     loop.create_task(process_updates())
     loop.create_task(checker_loop())
     loop.run_forever()
+
+def get_event_loop():
+    """Get the bot's event loop from the bot thread"""
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        return None
 
 if __name__ == '__main__':
     init_db()
