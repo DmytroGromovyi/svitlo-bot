@@ -665,7 +665,7 @@ async def handle_callback(update, context):
         if remove_user_group(chat_id, group):
             groups = get_user_groups(chat_id)
             await safe_edit(query, 
-                f"✅ Групу {group} видалено\n\n_Залишилось груп: {len(groups)}/{MAX_GROUPS_PER_USER}_", 
+                f"✅ Групу {group} видалено\n\n Залишилось груп: {len(groups)}/{MAX_GROUPS_PER_USER}", 
                 reply_markup=get_inline_keyboard(bool(groups)))
         return
     
