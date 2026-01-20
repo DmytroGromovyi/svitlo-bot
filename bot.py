@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Svitlo Bot - Simplified Power Outage Notification Bot
+Multi-Group Support Version
 """
 
 import os
@@ -35,6 +36,7 @@ PORT = int(os.getenv('PORT', 8080))
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 MAX_USERS = 25
+MAX_GROUPS_PER_USER = 6  # Maximum groups a user can subscribe to
 DB_PATH = '/data/users.db'
 GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 3)]  # Only X.1 and X.2 exist!
 
@@ -49,15 +51,23 @@ update_queue = Queue()
 # =============================================================================
 
 REPLY_KEYBOARD = ReplyKeyboardMarkup([
-    [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Моя група")],
-    [KeyboardButton("🔄 Змінити групу")]
+    [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Мої групи")],
+    [KeyboardButton("➕ Додати групу"), KeyboardButton("➖ Видалити групу")]
 ], resize_keyboard=True)
 
-INLINE_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("📋 Графік", callback_data="schedule"),
-     InlineKeyboardButton("ℹ️ Моя група", callback_data="mygroup")],
-    [InlineKeyboardButton("🔄 Змінити групу", callback_data="setgroup")]
-])
+def get_inline_keyboard(has_groups=True):
+    """Generate inline keyboard based on user state"""
+    if has_groups:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Графік", callback_data="schedule"),
+             InlineKeyboardButton("ℹ️ Мої групи", callback_data="mygroups")],
+            [InlineKeyboardButton("➕ Додати групу", callback_data="addgroup"),
+             InlineKeyboardButton("➖ Видалити групу", callback_data="removegroup")]
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Додати групу", callback_data="addgroup")]
+        ])
 
 # =============================================================================
 # DATABASE
@@ -68,17 +78,61 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # Migrate old table if needed
+    # Check if old table exists and migrate
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
     if c.fetchone():
+        # Check if it's the old single-group schema
         c.execute("PRAGMA table_info(users)")
-        if 'group' in [row[1] for row in c.fetchall()]:
-            c.execute('ALTER TABLE users RENAME COLUMN "group" TO group_number')
+        columns = [row[1] for row in c.fetchall()]
+        
+        if 'group_number' in columns or 'group' in columns:
+            logger.info("Migrating from single-group to multi-group schema...")
+            
+            # Rename old table
+            c.execute('ALTER TABLE users RENAME TO users_old')
+            
+            # Create new tables
+            c.execute('''CREATE TABLE users (
+                chat_id INTEGER PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            c.execute('''CREATE TABLE user_groups (
+                chat_id INTEGER,
+                group_number TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, group_number),
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )''')
+            
+            # Migrate data
+            group_col = 'group_number' if 'group_number' in columns else 'group'
+            c.execute(f'SELECT chat_id, {group_col}, created_at FROM users_old')
+            old_users = c.fetchall()
+            
+            for chat_id, group_num, created_at in old_users:
+                c.execute('INSERT OR IGNORE INTO users (chat_id, created_at) VALUES (?, ?)', 
+                         (chat_id, created_at))
+                if group_num:
+                    c.execute('INSERT OR IGNORE INTO user_groups (chat_id, group_number) VALUES (?, ?)',
+                             (chat_id, group_num))
+            
+            # Drop old table
+            c.execute('DROP TABLE users_old')
+            logger.info(f"Migration complete: {len(old_users)} users migrated")
     else:
+        # Create new tables from scratch
         c.execute('''CREATE TABLE users (
             chat_id INTEGER PRIMARY KEY,
-            group_number TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        c.execute('''CREATE TABLE user_groups (
+            chat_id INTEGER,
+            group_number TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, group_number),
+            FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
         )''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS schedules (
@@ -90,6 +144,7 @@ def init_db():
         schedule_hash TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     conn.commit()
     conn.close()
 
@@ -109,20 +164,54 @@ def db_execute(query, params=(), fetch_one=False, fetch_all=False):
     conn.close()
     return result
 
-def get_user_group(chat_id):
-    result = db_execute('SELECT group_number FROM users WHERE chat_id = ?', (chat_id,), fetch_one=True)
-    return result[0] if result else None
+def get_user_groups(chat_id):
+    """Get all groups for a user"""
+    rows = db_execute('SELECT group_number FROM user_groups WHERE chat_id = ? ORDER BY group_number', 
+                     (chat_id,), fetch_all=True)
+    return [row[0] for row in rows] if rows else []
 
-def save_user_group(chat_id, group):
+def add_user_group(chat_id, group):
+    """Add a group to user's subscriptions"""
     try:
-        db_execute('INSERT OR REPLACE INTO users (chat_id, group_number) VALUES (?, ?)', (chat_id, group))
+        # Ensure user exists
+        db_execute('INSERT OR IGNORE INTO users (chat_id) VALUES (?)', (chat_id,))
+        
+        # Check group limit
+        current_groups = get_user_groups(chat_id)
+        if len(current_groups) >= MAX_GROUPS_PER_USER:
+            return False, f"Максимум {MAX_GROUPS_PER_USER} груп"
+        
+        # Add group
+        db_execute('INSERT OR IGNORE INTO user_groups (chat_id, group_number) VALUES (?, ?)', 
+                  (chat_id, group))
+        return True, None
+    except Exception as e:
+        logger.error(f"Error adding group: {e}")
+        return False, "Помилка при додаванні групи"
+
+def remove_user_group(chat_id, group):
+    """Remove a group from user's subscriptions"""
+    try:
+        db_execute('DELETE FROM user_groups WHERE chat_id = ? AND group_number = ?', 
+                  (chat_id, group))
         return True
     except:
         return False
 
 def get_all_users():
-    rows = db_execute('SELECT chat_id, group_number FROM users', fetch_all=True)
-    return [{"chat_id": r[0], "group": r[1]} for r in rows]
+    """Get all users with their groups"""
+    rows = db_execute('''
+        SELECT u.chat_id, GROUP_CONCAT(ug.group_number, ',') as groups
+        FROM users u
+        LEFT JOIN user_groups ug ON u.chat_id = ug.chat_id
+        GROUP BY u.chat_id
+    ''', fetch_all=True)
+    
+    result = []
+    for chat_id, groups_str in rows:
+        groups = groups_str.split(',') if groups_str else []
+        result.append({"chat_id": chat_id, "groups": groups})
+    return result
 
 def get_schedule(group_number):
     result = db_execute('SELECT today_schedule, tomorrow_schedule, updated_at FROM schedules WHERE group_number = ?', 
@@ -378,14 +467,16 @@ async def check_and_notify():
         
         # Notify users only for changed groups
         for user in get_all_users():
-            if user['group'] in changed_groups:
+            user_changed_groups = [g for g in user['groups'] if g in changed_groups]
+            
+            for group in user_changed_groups:
                 try:
                     result = db_execute(
                         'SELECT today_schedule, tomorrow_schedule, previous_today, previous_tomorrow FROM schedules WHERE group_number = ?',
-                        (user['group'],), fetch_one=True
+                        (group,), fetch_one=True
                     )
                     if result:
-                        msg = format_notification(user['group'], result[0], result[1], result[2], result[3])
+                        msg = format_notification(group, result[0], result[1], result[2], result[3])
                         await bot_app.bot.send_message(chat_id=user['chat_id'], text=msg, parse_mode='MarkdownV2')
                         await asyncio.sleep(0.5)
                 except Exception as e:
@@ -419,92 +510,33 @@ async def safe_edit(query, text, parse_mode=None, reply_markup=None):
             raise
 
 async def start(update, context):
-    await update.message.reply_text(
-        "Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\nОберіть дію:",
-        reply_markup=REPLY_KEYBOARD
-    )
+    groups = get_user_groups(update.effective_chat.id)
+    if groups:
+        await update.message.reply_text(
+            f"Вітаю! 👋\n\nВи підписані на {len(groups)} груп(у/и).\n\nОберіть дію:",
+            reply_markup=REPLY_KEYBOARD
+        )
+    else:
+        await update.message.reply_text(
+            "Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\nДодайте групу для початку:",
+            reply_markup=REPLY_KEYBOARD
+        )
 
 async def show_schedule(update, context):
-    """Show schedule for user's group"""
+    """Show schedule for all user's groups"""
     chat_id = update.effective_chat.id
-    group = get_user_group(chat_id)
+    groups = get_user_groups(chat_id)
     
-    if not group:
-        await update.message.reply_text("❌ Спочатку оберіть групу", reply_markup=REPLY_KEYBOARD)
+    if not groups:
+        await update.message.reply_text("❌ Спочатку додайте групу", reply_markup=REPLY_KEYBOARD)
         return
     
-    schedule = get_schedule(group)
-    if not schedule:
-        await update.message.reply_text("ℹ️ Завантаження графіку...", reply_markup=REPLY_KEYBOARD)
-        return
-    
-    msg = f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
-    if schedule['today']:
-        msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
-    if schedule['tomorrow']:
-        msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
-    if schedule['updated_at']:
-        msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
-    msg += "ℹ️ _Графік може змінюватися протягом дня_"
-    
-    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
-
-async def show_group(update, context):
-    """Show user's current group"""
-    group = get_user_group(update.effective_chat.id)
-    text = f"📍 Ваша група: *{group}*" if group else "❌ Група не обрана"
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
-
-async def select_group(update, context):
-    """Show group selection menu"""
-    chat_id = update.effective_chat.id
-    user_count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
-    
-    if not get_user_group(chat_id) and user_count >= MAX_USERS:
-        await update.message.reply_text("❌ Ліміт користувачів", reply_markup=REPLY_KEYBOARD)
-        return
-    
-    kb = [[InlineKeyboardButton(g, callback_data=f"g_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
-    await update.message.reply_text("Оберіть групу:", reply_markup=InlineKeyboardMarkup(kb))
-
-async def handle_callback(update, context):
-    """Handle all callback queries"""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    # Group selection
-    if data.startswith("g_"):
-        group = data[2:]
-        if save_user_group(query.from_user.id, group):
-            # Try to load and show schedule immediately after group selection
-            schedule = get_schedule(group)
-            if schedule and schedule['today']:
-                msg = f"✅ Групу {group} збережено!\n\n"
-                msg += f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
-                if schedule['today']:
-                    msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
-                if schedule['tomorrow']:
-                    msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
-                if schedule['updated_at']:
-                    msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
-                msg += "ℹ️ _Графік може змінюватися протягом дня_"
-                await safe_edit(query, msg, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
-            else:
-                await safe_edit(query, f"✅ Групу {group} збережено!\n\nℹ️ Графік ще не завантажено. Спробуйте пізніше або натисніть 📋 Графік.", reply_markup=INLINE_KEYBOARD)
-        return
-    
-    # Inline menu actions
-    if data == "schedule":
-        group = get_user_group(query.from_user.id)
-        if not group:
-            await safe_edit(query, "❌ Спочатку оберіть групу", reply_markup=INLINE_KEYBOARD)
-            return
-        
+    for group in groups:
         schedule = get_schedule(group)
         if not schedule:
-            await safe_edit(query, "ℹ️ Завантаження графіку...", reply_markup=INLINE_KEYBOARD)
-            return
+            await update.message.reply_text(f"ℹ️ Завантаження графіку для групи {group}...", 
+                                          reply_markup=REPLY_KEYBOARD)
+            continue
         
         msg = f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
         if schedule['today']:
@@ -515,31 +547,195 @@ async def handle_callback(update, context):
             msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
         msg += "ℹ️ _Графік може змінюватися протягом дня_"
         
-        await safe_edit(query, msg, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
+        if len(groups) > 1:
+            await asyncio.sleep(0.3)  # Small delay between multiple messages
+
+async def show_groups(update, context):
+    """Show user's current groups"""
+    groups = get_user_groups(update.effective_chat.id)
+    if groups:
+        groups_str = ", ".join(groups)
+        text = f"📍 Ваші групи: *{groups_str}*\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_"
+    else:
+        text = "❌ Групи не обрані"
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
+
+async def add_group(update, context):
+    """Show group selection menu to add"""
+    chat_id = update.effective_chat.id
+    user_count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
+    current_groups = get_user_groups(chat_id)
     
-    elif data == "mygroup":
-        group = get_user_group(query.from_user.id)
-        text = f"📍 Ваша група: *{group}*\n\nОберіть дію:" if group else "❌ Група не обрана\n\nОберіть дію:"
-        await safe_edit(query, text, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
+    if not current_groups and user_count >= MAX_USERS:
+        await update.message.reply_text("❌ Ліміт користувачів", reply_markup=REPLY_KEYBOARD)
+        return
     
-    elif data == "setgroup":
-        kb = [[InlineKeyboardButton(g, callback_data=f"g_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
-        await safe_edit(query, "Оберіть вашу групу відключень:", reply_markup=InlineKeyboardMarkup(kb))
+    if len(current_groups) >= MAX_GROUPS_PER_USER:
+        await update.message.reply_text(
+            f"❌ Ви вже підписані на максимальну кількість груп ({MAX_GROUPS_PER_USER})",
+            reply_markup=REPLY_KEYBOARD
+        )
+        return
+    
+    # Show available groups (exclude already subscribed)
+    available = [g for g in GROUPS if g not in current_groups]
+    kb = [[InlineKeyboardButton(g, callback_data=f"add_{g}") for g in available[i:i+3]] 
+          for i in range(0, len(available), 3)]
+    
+    await update.message.reply_text("Оберіть групу для додавання:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def remove_group(update, context):
+    """Show group selection menu to remove"""
+    groups = get_user_groups(update.effective_chat.id)
+    
+    if not groups:
+        await update.message.reply_text("❌ У вас немає груп", reply_markup=REPLY_KEYBOARD)
+        return
+    
+    kb = [[InlineKeyboardButton(g, callback_data=f"rem_{g}") for g in groups[i:i+3]] 
+          for i in range(0, len(groups), 3)]
+    
+    await update.message.reply_text("Оберіть групу для видалення:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def handle_callback(update, context):
+    """Handle all callback queries"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat_id = query.from_user.id
+    
+    # Add group
+    if data.startswith("add_"):
+        group = data[4:]
+        success, error = add_user_group(chat_id, group)
+        
+        if success:
+            # Try to load and show schedule immediately
+            schedule = get_schedule(group)
+            groups = get_user_groups(chat_id)
+            
+            if schedule and schedule['today']:
+                msg = f"✅ Групу {group} додано!\n\n"
+                msg += f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
+                if schedule['today']:
+                    msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+                if schedule['tomorrow']:
+                    msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+                if schedule['updated_at']:
+                    msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+                msg += f"\n_Всього груп: {len(groups)}/{MAX_GROUPS_PER_USER}_"
+                await safe_edit(query, msg, parse_mode='Markdown', reply_markup=get_inline_keyboard(True))
+            else:
+                await safe_edit(query, 
+                    f"✅ Групу {group} додано!\n\nℹ️ Графік ще не завантажено.\n\n_Всього груп: {len(groups)}/{MAX_GROUPS_PER_USER}_", 
+                    reply_markup=get_inline_keyboard(True))
+        else:
+            await safe_edit(query, f"❌ {error}", reply_markup=get_inline_keyboard(bool(get_user_groups(chat_id))))
+        return
+    
+    # Remove group
+    if data.startswith("rem_"):
+        group = data[4:]
+        if remove_user_group(chat_id, group):
+            groups = get_user_groups(chat_id)
+            await safe_edit(query, 
+                f"✅ Групу {group} видалено\n\n_Залишилось груп: {len(groups)}/{MAX_GROUPS_PER_USER}_", 
+                reply_markup=get_inline_keyboard(bool(groups)))
+        return
+    
+    # Inline menu actions
+    if data == "schedule":
+        groups = get_user_groups(chat_id)
+        if not groups:
+            await safe_edit(query, "❌ Спочатку додайте групу", reply_markup=get_inline_keyboard(False))
+            return
+        
+        # Show first group schedule in edit, then send others as new messages
+        first_group = groups[0]
+        schedule = get_schedule(first_group)
+        
+        if schedule:
+            msg = f"📋 *Графік відключень*\n\n📍 Група: *{first_group}*\n\n"
+            if schedule['today']:
+                msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+            if schedule['tomorrow']:
+                msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+            if schedule['updated_at']:
+                msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+            msg += "ℹ️ _Графік може змінюватися протягом дня_"
+            
+            await safe_edit(query, msg, parse_mode='Markdown', reply_markup=get_inline_keyboard(True))
+        
+        # Send remaining groups as new messages
+        for group in groups[1:]:
+            schedule = get_schedule(group)
+            if schedule:
+                msg = f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
+                if schedule['today']:
+                    msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+                if schedule['tomorrow']:
+                    msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+                if schedule['updated_at']:
+                    msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+                msg += "ℹ️ _Графік може змінюватися протягом дня_"
+                
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                await asyncio.sleep(0.3)
+    
+    elif data == "mygroups":
+        groups = get_user_groups(chat_id)
+        if groups:
+            groups_str = ", ".join(groups)
+            text = f"📍 Ваші групи: *{groups_str}*\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_\n\nОберіть дію:"
+        else:
+            text = "❌ Групи не обрані\n\nОберіть дію:"
+        await safe_edit(query, text, parse_mode='Markdown', reply_markup=get_inline_keyboard(bool(groups)))
+    
+    elif data == "addgroup":
+        current_groups = get_user_groups(chat_id)
+        
+        if len(current_groups) >= MAX_GROUPS_PER_USER:
+            await safe_edit(query, 
+                f"❌ Ви вже підписані на максимальну кількість груп ({MAX_GROUPS_PER_USER})",
+                reply_markup=get_inline_keyboard(True))
+            return
+        
+        available = [g for g in GROUPS if g not in current_groups]
+        kb = [[InlineKeyboardButton(g, callback_data=f"add_{g}") for g in available[i:i+3]] 
+              for i in range(0, len(available), 3)]
+        
+        await safe_edit(query, "Оберіть групу для додавання:", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data == "removegroup":
+        groups = get_user_groups(chat_id)
+        
+        if not groups:
+            await safe_edit(query, "❌ У вас немає груп", reply_markup=get_inline_keyboard(False))
+            return
+        
+        kb = [[InlineKeyboardButton(g, callback_data=f"rem_{g}") for g in groups[i:i+3]] 
+              for i in range(0, len(groups), 3)]
+        
+        await safe_edit(query, "Оберіть групу для видалення:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_text(update, context):
     """Handle reply keyboard buttons"""
     text = update.message.text
     if text == "📋 Графік":
         await show_schedule(update, context)
-    elif text == "ℹ️ Моя група":
-        await show_group(update, context)
-    elif text == "🔄 Змінити групу":
-        await select_group(update, context)
+    elif text == "ℹ️ Мої групи":
+        await show_groups(update, context)
+    elif text == "➕ Додати групу":
+        await add_group(update, context)
+    elif text == "➖ Видалити групу":
+        await remove_group(update, context)
 
 async def stop(update, context):
     """Unsubscribe user"""
-    deleted = db_execute('DELETE FROM users WHERE chat_id = ?', (update.effective_chat.id,)).rowcount > 0
-    text = "✅ Ви відписані від сповіщень.\n\nЩоб підписатись знову, натисніть /start" if deleted else "ℹ️ Ви не були підписані"
+    deleted = db_execute('DELETE FROM users WHERE chat_id = ?', (update.effective_chat.id,))
+    # Cascade delete will handle user_groups
+    text = "✅ Ви відписані від сповіщень.\n\nЩоб підписатись знову, натисніть /start"
     await update.message.reply_text(text)
 
 # =============================================================================
@@ -551,7 +747,8 @@ flask_app = Flask(__name__)
 @flask_app.route('/health')
 def health():
     count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
-    return jsonify({'status': 'healthy', 'users': count})
+    total_groups = db_execute('SELECT COUNT(*) FROM user_groups', fetch_one=True)[0]
+    return jsonify({'status': 'healthy', 'users': count, 'total_subscriptions': total_groups})
 
 @flask_app.route('/api/users')
 def api_users():
@@ -590,8 +787,9 @@ async def setup():
     # Commands
     bot_app.add_handler(CommandHandler('start', start))
     bot_app.add_handler(CommandHandler('schedule', show_schedule))
-    bot_app.add_handler(CommandHandler('mygroup', show_group))
-    bot_app.add_handler(CommandHandler('setgroup', select_group))
+    bot_app.add_handler(CommandHandler('mygroups', show_groups))
+    bot_app.add_handler(CommandHandler('addgroup', add_group))
+    bot_app.add_handler(CommandHandler('removegroup', remove_group))
     bot_app.add_handler(CommandHandler('stop', stop))
     
     # Callbacks and text
