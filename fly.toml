@@ -29,6 +29,3 @@ app = 'svitlo-bot-wandering-voice-5007'
 [mounts]
   source = "svitlo_data"
   destination = "/data"
-
-# Note: For cron job, create a separate machine
-# See DEPLOYMENT.md for instructions
