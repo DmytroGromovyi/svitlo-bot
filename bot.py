@@ -431,7 +431,7 @@ def format_schedule_display(schedule_text):
         total += dur
         lines.append(f"  • {fmt_time(s)} — {fmt_time(e)} ({fmt_hours(dur/60)} год)")
     if iv['off']:
-        lines.append(f"\n⏱ *Загалом відключено:* {fmt_hours(total/60)} годин")
+        lines.append(f"\n⏱ *Загалом вимкнено:* {fmt_hours(total/60)} годин")
     else:
         lines.append("  • немає даних")
 
@@ -441,7 +441,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
     city_name = CITIES.get(city, {}).get('name', city)
     city_emoji = CITIES.get(city, {}).get('emoji', '🏙')
     
-    msg = f"⚡️ *Оновлення графіку відключень\\!*\n\n{esc(city_emoji)} Місто: *{esc(city_name)}*\n📍 Група: *{esc(group)}*\n\n"
+    msg = f"⚡️ *Оновлення графіку вимкнень\\!*\n\n{esc(city_emoji)} Область: *{esc(city_name)}*\n📍 Група: *{esc(group)}*\n\n"
     
     curr = extract_intervals(curr_today)
     prev = extract_intervals(prev_today) if prev_today else {'on': [], 'off': []}
@@ -461,7 +461,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
             msg += "\n"
         
         if off_added:
-            msg += "⚠️ *Нові відключення:*\n"
+            msg += "⚠️ *Нові вимкнення:*\n"
             for s, e in off_added:
                 msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours((e-s)/60))} год\\)\n"
             msg += "\n"
@@ -494,7 +494,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
         total += dur
         msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
     if curr['off']:
-        msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total/60))} годин\n"
+        msg += f"\n⏱ *Загалом вимкнено:* {esc(fmt_hours(total/60))} годин\n"
     else:
         msg += "  • немає даних\n"
     
@@ -516,7 +516,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
             total_tm += dur
             msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
         if tm['off']:
-            msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total_tm/60))} годин\n"
+            msg += f"\n⏱ *Загалом вимкнено:* {esc(fmt_hours(total_tm/60))} годин\n"
         else:
             msg += "  • немає даних\n"
     
@@ -645,7 +645,7 @@ async def start(update, context):
     
     if not city:
         await update.message.reply_text(
-            "Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\n🏙 Спочатку оберіть ваше місто:",
+            "Вітаю! 👋\n\nЯ допоможу відстежувати графік вимкнень світла.\n\n🏙 Спочатку оберіть ваше місто:",
             reply_markup=get_city_keyboard()
         )
         return
@@ -655,13 +655,13 @@ async def start(update, context):
     
     if groups:
         await update.message.reply_text(
-            f"Вітаю! 👋\n\n🏙 Місто: *{city_name}*\nВи підписані на {len(groups)} груп(у/и).\n\nОберіть дію:",
+            f"Вітаю! 👋\n\n🏙 Область: *{city_name}*\nВи підписані на {len(groups)} груп(у/и).\n\nОберіть дію:",
             parse_mode='Markdown',
             reply_markup=REPLY_KEYBOARD
         )
     else:
         await update.message.reply_text(
-            f"Вітаю! 👋\n\n🏙 Місто: *{city_name}*\n\nДодайте групу для початку:",
+            f"Вітаю! 👋\n\n🏙 Область: *{city_name}*\n\nДодайте групу для початку:",
             parse_mode='Markdown',
             reply_markup=REPLY_KEYBOARD
         )
@@ -692,7 +692,7 @@ async def show_schedule(update, context):
             )
             continue
         
-        msg = f"📋 *Графік відключень*\n\n{city_emoji} Місто: *{city_name}*\n📍 Група: *{group}*\n\n"
+        msg = f"📋 *Графік вимкнень*\n\n{city_emoji} Область: *{city_name}*\n📍 Група: *{group}*\n\n"
         if schedule['today']:
             msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
         if schedule['tomorrow']:
@@ -719,9 +719,9 @@ async def show_groups(update, context):
     
     if groups:
         groups_str = ", ".join(groups)
-        text = f"{city_emoji} *Місто:* {city_name}\n📍 *Ваші групи:* {groups_str}\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_"
+        text = f"{city_emoji} *Область:* {city_name}\n📍 *Ваші групи:* {groups_str}\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_"
     else:
-        text = f"{city_emoji} *Місто:* {city_name}\n❌ Групи не обрані"
+        text = f"{city_emoji} *Область:* {city_name}\n❌ Групи не обрані"
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
 
 async def show_cities(update, context):
@@ -811,14 +811,14 @@ async def handle_callback(update, context):
         if groups:
             await safe_edit(
                 query,
-                f"✅ Місто змінено на {city_emoji} *{city_name}*\n\nВи підписані на {len(groups)} груп(у/и)\n\nОберіть дію:",
+                f"✅ Область змінено на {city_emoji} *{city_name}*\n\nВи підписані на {len(groups)} груп(у/и)\n\nОберіть дію:",
                 parse_mode='Markdown',
                 reply_markup=get_inline_keyboard(True)
             )
         else:
             await safe_edit(
                 query,
-                f"✅ Місто обрано: {city_emoji} *{city_name}*\n\nТепер додайте групу:",
+                f"✅ Область обрано: {city_emoji} *{city_name}*\n\nТепер додайте групу:",
                 parse_mode='Markdown',
                 reply_markup=get_inline_keyboard(False)
             )
@@ -841,7 +841,7 @@ async def handle_callback(update, context):
             
             if schedule and schedule['today']:
                 msg = f"✅ Групу {group} додано!\n\n"
-                msg += f"📋 *Графік відключень*\n\n{city_emoji} Місто: *{city_name}*\n📍 Група: *{group}*\n\n"
+                msg += f"📋 *Графік вимкнень*\n\n{city_emoji} Область: *{city_name}*\n📍 Група: *{group}*\n\n"
                 if schedule['today']:
                     msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
                 if schedule['tomorrow']:
@@ -893,7 +893,7 @@ async def handle_callback(update, context):
         schedule = get_schedule(city, first_group)
         
         if schedule:
-            msg = f"📋 *Графік відключень*\n\n{city_emoji} Місто: *{city_name}*\n📍 Група: *{first_group}*\n\n"
+            msg = f"📋 *Графік вимкнень*\n\n{city_emoji} Область: *{city_name}*\n📍 Група: *{first_group}*\n\n"
             if schedule['today']:
                 msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
             if schedule['tomorrow']:
@@ -907,7 +907,7 @@ async def handle_callback(update, context):
         for group in groups[1:]:
             schedule = get_schedule(city, group)
             if schedule:
-                msg = f"📋 *Графік відключень*\n\n{city_emoji} Місто: *{city_name}*\n📍 Група: *{group}*\n\n"
+                msg = f"📋 *Графік вимкнень*\n\n{city_emoji} Область: *{city_name}*\n📍 Група: *{group}*\n\n"
                 if schedule['today']:
                     msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
                 if schedule['tomorrow']:
@@ -931,9 +931,9 @@ async def handle_callback(update, context):
         
         if groups:
             groups_str = ", ".join(groups)
-            text = f"{city_emoji} *Місто:* {city_name}\n📍 *Ваші групи:* {groups_str}\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_\n\nОберіть дію:"
+            text = f"{city_emoji} *Область:* {city_name}\n📍 *Ваші групи:* {groups_str}\n\n_Ви можете мати до {MAX_GROUPS_PER_USER} груп_\n\nОберіть дію:"
         else:
-            text = f"{city_emoji} *Місто:* {city_name}\n❌ Групи не обрані\n\nОберіть дію:"
+            text = f"{city_emoji} *Область:* {city_name}\n❌ Групи не обрані\n\nОберіть дію:"
         await safe_edit(query, text, parse_mode='Markdown', reply_markup=get_inline_keyboard(bool(groups)))
     
     elif data == "addgroup":

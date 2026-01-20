@@ -22,7 +22,7 @@ CITY_CONFIGS = {
         'source_type': 'api',  # Uses API endpoint
     },
     'ivano-frankivsk': {
-        'name': 'Франківська область',
+        'name': 'Івано-Франківська область',
         'url': 'https://github.com/yaroslav2901/OE_OUTAGE_DATA/blob/main/data/Prykarpattiaoblenerho.json',
         'api_url': 'https://raw.githubusercontent.com/yaroslav2901/OE_OUTAGE_DATA/main/data/Prykarpattiaoblenerho.json',
         'source_type': 'github_json',  # Direct JSON from GitHub
