@@ -76,11 +76,11 @@ def get_inline_keyboard(has_groups=True):
              InlineKeyboardButton("ℹ️ Мої групи", callback_data="mygroups")],
             [InlineKeyboardButton("➕ Додати групу", callback_data="addgroup"),
              InlineKeyboardButton("➖ Видалити групу", callback_data="removegroup")],
-            [InlineKeyboardButton("🏙 Змінити місто", callback_data="changecity")]
+            [InlineKeyboardButton("🏙 Змінити область", callback_data="changecity")]
         ])
     else:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏙 Обрати місто", callback_data="selectcity")]
+            [InlineKeyboardButton("🏙 Обрати область", callback_data="selectcity")]
         ])
 
 def get_city_keyboard():
@@ -645,7 +645,7 @@ async def start(update, context):
     
     if not city:
         await update.message.reply_text(
-            "Вітаю! 👋\n\nЯ допоможу відстежувати графік вимкнень світла.\n\n🏙 Спочатку оберіть ваше місто:",
+            "Вітаю! 👋\n\nЯ допоможу відстежувати графік вимкнень світла.\n\n🏙 Спочатку оберіть вашу область:",
             reply_markup=get_city_keyboard()
         )
         return
@@ -671,7 +671,7 @@ async def show_schedule(update, context):
     city = get_user_city(chat_id)
     
     if not city:
-        await update.message.reply_text("❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+        await update.message.reply_text("❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
         return
     
     groups = get_user_groups(chat_id, city)
@@ -710,7 +710,7 @@ async def show_groups(update, context):
     city = get_user_city(chat_id)
     
     if not city:
-        await update.message.reply_text("❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+        await update.message.reply_text("❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
         return
     
     groups = get_user_groups(chat_id, city)
@@ -732,7 +732,7 @@ async def show_cities(update, context):
     if current_city:
         city_name = CITIES[current_city]['name']
         text += f"_Поточна область: {city_name}_\n\n"
-        text += "⚠️ _При зміні області ваші поточні підписки залишаться, але графіки будуть показуватися для нового міста_"
+        text += "⚠️ _При зміні області ваші поточні підписки залишаться, але графіки будуть показуватися для нової області_"
     
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_city_keyboard())
 
@@ -741,7 +741,7 @@ async def add_group(update, context):
     city = get_user_city(chat_id)
     
     if not city:
-        await update.message.reply_text("❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+        await update.message.reply_text("❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
         return
     
     user_count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
@@ -773,7 +773,7 @@ async def remove_group(update, context):
     city = get_user_city(chat_id)
     
     if not city:
-        await update.message.reply_text("❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+        await update.message.reply_text("❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
         return
     
     groups = get_user_groups(chat_id, city)
@@ -800,7 +800,7 @@ async def handle_callback(update, context):
     if data.startswith("city_"):
         city_id = data[5:]
         if city_id not in CITIES:
-            await safe_edit(query, "❌ Невідоме місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Невідома область", reply_markup=get_city_keyboard())
             return
         
         set_user_city(chat_id, city_id)
@@ -827,7 +827,7 @@ async def handle_callback(update, context):
     if data.startswith("add_"):
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         group = data[4:]
@@ -863,7 +863,7 @@ async def handle_callback(update, context):
     if data.startswith("rem_"):
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         group = data[4:]
@@ -879,7 +879,7 @@ async def handle_callback(update, context):
     if data == "schedule":
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         groups = get_user_groups(chat_id, city)
@@ -922,7 +922,7 @@ async def handle_callback(update, context):
     elif data == "mygroups":
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         groups = get_user_groups(chat_id, city)
@@ -939,7 +939,7 @@ async def handle_callback(update, context):
     elif data == "addgroup":
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         current_groups = get_user_groups(chat_id, city)
@@ -962,7 +962,7 @@ async def handle_callback(update, context):
     elif data == "removegroup":
         city = get_user_city(chat_id)
         if not city:
-            await safe_edit(query, "❌ Спочатку оберіть місто", reply_markup=get_city_keyboard())
+            await safe_edit(query, "❌ Спочатку оберіть область", reply_markup=get_city_keyboard())
             return
         
         groups = get_user_groups(chat_id, city)
@@ -980,11 +980,11 @@ async def handle_callback(update, context):
     elif data in ["changecity", "selectcity"]:
         current_city = get_user_city(chat_id)
         
-        text = "🏙 *Оберіть місто:*\n\n"
+        text = "🏙 *Оберіть область:*\n\n"
         if current_city:
             city_name = CITIES[current_city]['name']
-            text += f"_Поточне місто: {city_name}_\n\n"
-            text += "⚠️ _При зміні міста ваші підписки у старому місті залишаться_"
+            text += f"_Поточна область: {city_name}_\n\n"
+            text += "⚠️ _При зміні області ваші підписки у старій області залишаться_"
         
         await safe_edit(query, text, parse_mode='Markdown', reply_markup=get_city_keyboard())
 
