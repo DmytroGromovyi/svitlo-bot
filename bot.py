@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Svitlo Bot - Power Outage Notification Bot
-Refactored: Clear diff-first notifications for better UX
+Svitlo Bot - Simplified Power Outage Notification Bot
 """
 
 import os
@@ -11,7 +10,6 @@ import sqlite3
 import json
 import re
 import hashlib
-from typing import Optional, Dict, List, Tuple
 from pathlib import Path
 from queue import Queue
 from threading import Thread
@@ -20,7 +18,7 @@ import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import BadRequest
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from flask import Flask, request, jsonify
 
 import sys
@@ -28,7 +26,7 @@ sys.path.append(os.path.dirname(__file__))
 from scraper import ScheduleScraper
 
 # =============================================================================
-# CONFIGURATION
+# CONFIG
 # =============================================================================
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -40,41 +38,26 @@ MAX_USERS = 25
 DB_PATH = '/data/users.db'
 GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 4)]
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot_app = None
 update_queue = Queue()
 
 # =============================================================================
-# HELPERS
+# KEYBOARDS
 # =============================================================================
 
-def get_main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Графік", callback_data="action_schedule"),
-         InlineKeyboardButton("🔄 Змінити групу", callback_data="action_setgroup")],
-        [InlineKeyboardButton("ℹ️ Моя група", callback_data="action_mygroup")]
-    ])
+REPLY_KEYBOARD = ReplyKeyboardMarkup([
+    [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Моя група")],
+    [KeyboardButton("🔄 Змінити групу")]
+], resize_keyboard=True)
 
-def get_reply_keyboard():
-    """Get persistent reply keyboard that's always visible"""
-    keyboard = [
-        [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Моя група")],
-        [KeyboardButton("🔄 Змінити групу")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-async def safe_edit(query, text, parse_mode=None, reply_markup=None):
-    try:
-        await query.edit_message_text(text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-            raise
-
-async def error_handler(update, context):
-    if not isinstance(context.error, BadRequest) or "Message is not modified" not in str(context.error):
-        logger.error("Telegram error", exc_info=context.error)
+INLINE_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📋 Графік", callback_data="schedule"),
+     InlineKeyboardButton("ℹ️ Моя група", callback_data="mygroup")],
+    [InlineKeyboardButton("🔄 Змінити групу", callback_data="setgroup")]
+])
 
 # =============================================================================
 # DATABASE
@@ -85,11 +68,11 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
+    # Migrate old table if needed
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
     if c.fetchone():
         c.execute("PRAGMA table_info(users)")
-        cols = [row[1] for row in c.fetchall()]
-        if 'group' in cols and 'group_number' not in cols:
+        if 'group' in [row[1] for row in c.fetchall()]:
             c.execute('ALTER TABLE users RENAME COLUMN "group" TO group_number')
     else:
         c.execute('''CREATE TABLE users (
@@ -110,67 +93,49 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_user_count() -> int:
+def db_execute(query, params=(), fetch_one=False, fetch_all=False):
+    """Single DB helper to reduce boilerplate"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM users')
-    count = c.fetchone()[0]
+    c.execute(query, params)
+    
+    result = None
+    if fetch_one:
+        result = c.fetchone()
+    elif fetch_all:
+        result = c.fetchall()
+    
+    conn.commit()
     conn.close()
-    return count
+    return result
 
-def get_user_group(chat_id: int) -> Optional[str]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT group_number FROM users WHERE chat_id = ?', (chat_id,))
-    result = c.fetchone()
-    conn.close()
+def get_user_group(chat_id):
+    result = db_execute('SELECT group_number FROM users WHERE chat_id = ?', (chat_id,), fetch_one=True)
     return result[0] if result else None
 
-def save_user_group(chat_id: int, group: str) -> bool:
+def save_user_group(chat_id, group):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO users (chat_id, group_number) VALUES (?, ?)', (chat_id, group))
-        conn.commit()
-        conn.close()
+        db_execute('INSERT OR REPLACE INTO users (chat_id, group_number) VALUES (?, ?)', (chat_id, group))
         return True
-    except Exception as e:
-        logger.error(f"Error saving user: {e}")
+    except:
         return False
 
-def get_all_users() -> list:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT chat_id, group_number FROM users')
-    users = [{"chat_id": r[0], "group": r[1]} for r in c.fetchall()]
-    conn.close()
-    return users
+def get_all_users():
+    rows = db_execute('SELECT chat_id, group_number FROM users', fetch_all=True)
+    return [{"chat_id": r[0], "group": r[1]} for r in rows]
 
-def delete_user(chat_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM users WHERE chat_id = ?', (chat_id,))
-    conn.commit()
-    deleted = c.rowcount > 0
-    conn.close()
-    return deleted
+def get_schedule(group_number):
+    result = db_execute('SELECT today_schedule, tomorrow_schedule, updated_at FROM schedules WHERE group_number = ?', 
+                       (group_number,), fetch_one=True)
+    return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def get_schedule_from_db(group_number: str) -> Optional[dict]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT today_schedule, tomorrow_schedule, updated_at FROM schedules WHERE group_number = ?', (group_number,))
-    r = c.fetchone()
-    conn.close()
-    return {'today': r[0], 'tomorrow': r[1], 'updated_at': r[2]} if r else None
-
-def save_schedule_to_db(group_number: str, today: str, tomorrow: str, schedule_hash: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT today_schedule, tomorrow_schedule FROM schedules WHERE group_number = ?', (group_number,))
-    curr = c.fetchone()
+def save_schedule(group_number, today, tomorrow, schedule_hash):
+    # Get current to store as previous
+    curr = db_execute('SELECT today_schedule, tomorrow_schedule FROM schedules WHERE group_number = ?', 
+                     (group_number,), fetch_one=True)
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
     
-    c.execute('''INSERT INTO schedules (group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
+    db_execute('''INSERT INTO schedules (group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(group_number) DO UPDATE SET
             previous_today = schedules.today_schedule,
@@ -180,374 +145,363 @@ def save_schedule_to_db(group_number: str, today: str, tomorrow: str, schedule_h
             schedule_hash = excluded.schedule_hash,
             updated_at = CURRENT_TIMESTAMP
     ''', (group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
-    conn.commit()
-    conn.close()
 
-def get_schedule_hash(group_number: str) -> Optional[str]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT schedule_hash FROM schedules WHERE group_number = ?', (group_number,))
-    r = c.fetchone()
-    conn.close()
-    return r[0] if r else None
+def get_schedule_hash(group_number):
+    result = db_execute('SELECT schedule_hash FROM schedules WHERE group_number = ?', (group_number,), fetch_one=True)
+    return result[0] if result else None
 
 # =============================================================================
 # SCHEDULE PARSING
 # =============================================================================
 
 def parse_schedule_entries(group_data):
-    today_text, tomorrow_text = None, None
+    """Extract today and tomorrow schedules from group data"""
+    today, tomorrow = None, None
     for entry in group_data:
-        date_name = entry.get('date', '').lower()
-        schedule_text = entry.get('schedule', '')
-        if 'сьогодні' in date_name or 'сього' in date_name:
-            today_text = schedule_text
-        elif 'завтра' in date_name:
-            tomorrow_text = schedule_text
-        elif not today_text:
-            today_text = schedule_text
-        elif not tomorrow_text:
-            tomorrow_text = schedule_text
-    return today_text, tomorrow_text
+        date = entry.get('date', '').lower()
+        schedule = entry.get('schedule', '')
+        if 'сьогодні' in date or 'сього' in date:
+            today = schedule
+        elif 'завтра' in date:
+            tomorrow = schedule
+        elif not today:
+            today = schedule
+        elif not tomorrow:
+            tomorrow = schedule
+    return today, tomorrow
 
-def to_minutes(time_str: str) -> int:
-    h, m = map(int, time_str.split(':'))
-    return h * 60 + m
-
-def fmt_time(mins: int) -> str:
-    return "24:00" if mins >= 1440 else f"{mins // 60:02d}:{mins % 60:02d}"
-
-def fmt_hours(hours_float: float) -> str:
-    return f"{hours_float:.1f}"
-
-def extract_intervals(schedule_text: str) -> Dict[str, List[Tuple[int, int]]]:
+def extract_intervals(schedule_text):
+    """Extract ON/OFF intervals from schedule text"""
     if not schedule_text:
         return {'on': [], 'off': []}
     
+    # Find all OFF periods
     off_ranges = re.findall(r'з (\d{1,2}:\d{2}) до (\d{1,2}:\d{2})', schedule_text)
-    off_intervals = sorted([(to_minutes(s), to_minutes(e)) for s, e in off_ranges])
+    to_min = lambda t: int(t.split(':')[0]) * 60 + int(t.split(':')[1])
+    off_intervals = sorted([(to_min(s), to_min(e)) for s, e in off_ranges])
     
+    # Calculate ON periods (gaps between OFF)
     on_intervals = []
-    last_end = 0
+    last = 0
     for start, end in off_intervals:
-        if start > last_end:
-            on_intervals.append((last_end, start))
-        last_end = end
-    if last_end < 1440:
-        on_intervals.append((last_end, 1440))
+        if start > last:
+            on_intervals.append((last, start))
+        last = end
+    if last < 1440:
+        on_intervals.append((last, 1440))
     
     return {'on': on_intervals, 'off': off_intervals}
 
-def calculate_diff(current: Dict, previous: Dict) -> Dict:
-    return {
-        'on_added': [iv for iv in current['on'] if iv not in previous['on']],
-        'on_removed': [iv for iv in previous['on'] if iv not in current['on']],
-        'off_added': [iv for iv in current['off'] if iv not in previous['off']],
-        'off_removed': [iv for iv in previous['off'] if iv not in current['off']]
-    }
+def fmt_time(mins):
+    """Format minutes as HH:MM"""
+    return "24:00" if mins >= 1440 else f"{mins // 60:02d}:{mins % 60:02d}"
+
+def fmt_hours(hours):
+    """Format hours for display"""
+    return f"{hours:.1f}"
+
+def esc(text):
+    """Escape MarkdownV2 special chars"""
+    for c in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(c, f'\\{c}')
+    return text
 
 # =============================================================================
 # MESSAGE FORMATTING
 # =============================================================================
 
-def esc(text: str) -> str:
-    """Escape MarkdownV2 special chars"""
-    for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
-        text = text.replace(char, f'\\{char}')
-    return text
-
-def format_schedule_text(schedule_text: str) -> str:
+def format_schedule_display(schedule_text):
+    """Format schedule for regular display"""
     if not schedule_text:
         return "ℹ️ Інформація відсутня"
 
-    intervals = extract_intervals(schedule_text)
+    iv = extract_intervals(schedule_text)
     lines = ["🟢 *Є світло:*"]
     
-    if intervals['on']:
-        for s, e in intervals['on']:
-            if s != e:
-                lines.append(f"  • {fmt_time(s)} — {fmt_time(e)}")
-    else:
+    for s, e in iv['on']:
+        if s != e:
+            lines.append(f"  • {fmt_time(s)} — {fmt_time(e)}")
+    if not iv['on']:
         lines.append("  • немає даних")
 
     lines.append("\n🔴 *Немає світла:*")
-    total_off = 0
-    if intervals['off']:
-        for s, e in intervals['off']:
-            dur = e - s
-            total_off += dur
-            lines.append(f"  • {fmt_time(s)} — {fmt_time(e)} ({fmt_hours(dur/60)} год)")
-        lines.append(f"\n⏱ *Загалом відключено:* {fmt_hours(total_off/60)} годин")
+    total = 0
+    for s, e in iv['off']:
+        dur = e - s
+        total += dur
+        lines.append(f"  • {fmt_time(s)} — {fmt_time(e)} ({fmt_hours(dur/60)} год)")
+    if iv['off']:
+        lines.append(f"\n⏱ *Загалом відключено:* {fmt_hours(total/60)} годин")
     else:
         lines.append("  • немає даних")
 
     return "\n".join(lines)
 
-def format_notification_message(group_number: str, current_today: str, current_tomorrow: str, 
-                                previous_today: str = None, previous_tomorrow: str = None) -> str:
-    """Diff-first notification format"""
-    
-    msg = "⚡️ *Оновлення графіку відключень\\!*\n\n"
-    msg += f"📍 Група: *{esc(group_number)}*\n\n"
+def format_notification(group, curr_today, curr_tomorrow, prev_today=None, prev_tomorrow=None):
+    """Format notification with diff-first approach"""
+    msg = f"⚡️ *Оновлення графіку відключень\\!*\n\n📍 Група: *{esc(group)}*\n\n"
     
     # Calculate diff
-    curr_iv = extract_intervals(current_today)
-    prev_iv = extract_intervals(previous_today) if previous_today else {'on': [], 'off': []}
-    diff = calculate_diff(curr_iv, prev_iv)
+    curr = extract_intervals(curr_today)
+    prev = extract_intervals(prev_today) if prev_today else {'on': [], 'off': []}
     
-    has_changes = any([diff['on_added'], diff['on_removed'], diff['off_added'], diff['off_removed']])
+    off_removed = [iv for iv in prev['off'] if iv not in curr['off']]
+    off_added = [iv for iv in curr['off'] if iv not in prev['off']]
+    on_removed = [iv for iv in prev['on'] if iv not in curr['on']]
+    on_added = [iv for iv in curr['on'] if iv not in prev['on']]
     
-    # SECTION 1: WHAT CHANGED
-    if has_changes:
+    # Show changes
+    if off_removed or off_added or on_removed or on_added:
         msg += "📊 *ЩО ЗМІНИЛОСЬ:*\n\n"
         
-        if diff['off_removed']:
+        if off_removed:
             msg += "✅ *Світло з\\'явилось:*\n"
-            for s, e in diff['off_removed']:
+            for s, e in off_removed:
                 msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
             msg += "\n"
         
-        if diff['off_added']:
+        if off_added:
             msg += "⚠️ *Нові відключення:*\n"
-            for s, e in diff['off_added']:
-                dur = e - s
-                msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
+            for s, e in off_added:
+                msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours((e-s)/60))} год\\)\n"
             msg += "\n"
         
-        if diff['on_removed']:
+        if on_removed:
             msg += "🔻 *Прибрано періоди зі світлом:*\n"
-            for s, e in diff['on_removed']:
+            for s, e in on_removed:
                 msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
             msg += "\n"
         
-        if diff['on_added']:
+        if on_added:
             msg += "🔺 *Додано періоди зі світлом:*\n"
-            for s, e in diff['on_added']:
+            for s, e in on_added:
                 msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
             msg += "\n"
         
         msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # SECTION 2: FULL SCHEDULE TODAY
-    msg += "📅 *ПОВНИЙ ГРАФІК НА СЬОГОДНІ:*\n\n"
-    msg += "🟢 *Є світло:*\n"
-    
-    if curr_iv['on']:
-        for s, e in curr_iv['on']:
-            if s != e:
-                msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
-    else:
+    # Full schedule today
+    msg += "📅 *ПОВНИЙ ГРАФІК НА СЬОГОДНІ:*\n\n🟢 *Є світло:*\n"
+    for s, e in curr['on']:
+        if s != e:
+            msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
+    if not curr['on']:
         msg += "  • немає даних\n"
     
     msg += "\n🔴 *Немає світла:*\n"
-    total_off = 0
-    if curr_iv['off']:
-        for s, e in curr_iv['off']:
-            dur = e - s
-            total_off += dur
-            msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
-        msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total_off/60))} годин\n"
+    total = 0
+    for s, e in curr['off']:
+        dur = e - s
+        total += dur
+        msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
+    if curr['off']:
+        msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total/60))} годин\n"
     else:
         msg += "  • немає даних\n"
     
-    # SECTION 3: TOMORROW
-    if current_tomorrow:
-        msg += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        msg += "📅 *ЗАВТРА:*\n\n"
+    # Tomorrow if available
+    if curr_tomorrow:
+        msg += "\n━━━━━━━━━━━━━━━━━━━━\n\n📅 *ЗАВТРА:*\n\n"
+        tm = extract_intervals(curr_tomorrow)
         
-        tm_iv = extract_intervals(current_tomorrow)
         msg += "🟢 *Є світло:*\n"
-        
-        if tm_iv['on']:
-            for s, e in tm_iv['on']:
-                if s != e:
-                    msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
-        else:
+        for s, e in tm['on']:
+            if s != e:
+                msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))}\n"
+        if not tm['on']:
             msg += "  • немає даних\n"
         
         msg += "\n🔴 *Немає світла:*\n"
-        total_off_tm = 0
-        if tm_iv['off']:
-            for s, e in tm_iv['off']:
-                dur = e - s
-                total_off_tm += dur
-                msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
-            msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total_off_tm/60))} годин\n"
+        total_tm = 0
+        for s, e in tm['off']:
+            dur = e - s
+            total_tm += dur
+            msg += f"  • {esc(fmt_time(s))} — {esc(fmt_time(e))} \\({esc(fmt_hours(dur/60))} год\\)\n"
+        if tm['off']:
+            msg += f"\n⏱ *Загалом відключено:* {esc(fmt_hours(total_tm/60))} годин\n"
         else:
             msg += "  • немає даних\n"
     
     msg += "\n_Графік може змінюватися протягом дня_"
     return msg
 
-def format_schedule_message(group_number: str, today: str, tomorrow: str, updated_at: str) -> str:
-    msg = f"📋 *Графік відключень*\n\n📍 Група: *{group_number}*\n\n"
-    if today:
-        msg += "📅 *Сьогодні*\n" + format_schedule_text(today) + "\n\n"
-    if tomorrow:
-        msg += "📅 *Завтра*\n" + format_schedule_text(tomorrow) + "\n\n"
-    if updated_at:
-        msg += f"🕐 Оновлено: _{updated_at}_\n"
-    msg += "ℹ️ _Графік може змінюватися протягом дня_"
-    return msg
-
 # =============================================================================
-# BACKGROUND TASKS
+# BACKGROUND CHECKER
 # =============================================================================
 
-async def check_schedule_and_notify():
-    global bot_app
+async def check_and_notify():
+    """Check for schedule updates and notify users"""
     try:
         scraper = ScheduleScraper()
         json_content = scraper.fetch_schedule()
         if not json_content:
             return
         
-        new_schedule = scraper.parse_schedule(json_content)
-        if not new_schedule:
+        schedule = scraper.parse_schedule(json_content)
+        if not schedule:
             return
         
-        groups_data = new_schedule.get('groups', {})
+        # Check each group for changes
         changed_groups = []
-        
-        for g_num, g_data in groups_data.items():
-            t_text, tm_text = parse_schedule_entries(g_data)
-            if not t_text:
+        for group, data in schedule.get('groups', {}).items():
+            today, tomorrow = parse_schedule_entries(data)
+            if not today:
                 continue
             
-            new_hash = hashlib.sha256(f"{t_text}|{tm_text or ''}".encode('utf-8')).hexdigest()
-            
-            if new_hash != get_schedule_hash(g_num):
-                changed_groups.append(g_num)
-                save_schedule_to_db(g_num, t_text or '', tm_text or '', new_hash)
+            new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
+            if new_hash != get_schedule_hash(group):
+                changed_groups.append(group)
+                save_schedule(group, today or '', tomorrow or '', new_hash)
         
         if not changed_groups:
             return
         
+        # Notify users
         for user in get_all_users():
             if user['group'] in changed_groups:
                 try:
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    c.execute('SELECT today_schedule, tomorrow_schedule, previous_today, previous_tomorrow FROM schedules WHERE group_number = ?', (user['group'],))
-                    result = c.fetchone()
-                    conn.close()
-                    
+                    result = db_execute(
+                        'SELECT today_schedule, tomorrow_schedule, previous_today, previous_tomorrow FROM schedules WHERE group_number = ?',
+                        (user['group'],), fetch_one=True
+                    )
                     if result:
-                        curr_today, curr_tomorrow, prev_today, prev_tomorrow = result
-                        msg = format_notification_message(user['group'], curr_today, curr_tomorrow, prev_today, prev_tomorrow)
+                        msg = format_notification(user['group'], result[0], result[1], result[2], result[3])
                         await bot_app.bot.send_message(chat_id=user['chat_id'], text=msg, parse_mode='MarkdownV2')
                         await asyncio.sleep(0.5)
-                        
                 except Exception as e:
                     logger.error(f"Notify error {user['chat_id']}: {e}")
                     
     except Exception as e:
-        logger.error(f"Checker error: {e}", exc_info=True)
+        logger.error(f"Checker error: {e}")
 
-async def schedule_checker_loop():
+async def checker_loop():
+    """Background loop to check schedules"""
     await asyncio.sleep(10)
     while True:
-        await check_schedule_and_notify()
+        await check_and_notify()
         await asyncio.sleep(300)
 
 # =============================================================================
 # TELEGRAM HANDLERS
 # =============================================================================
 
-async def handle_inline_actions(update, context):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "action_schedule":
-        group = get_user_group(query.from_user.id)
-        if not group:
-            await safe_edit(query, "❌ Спочатку оберіть групу:", parse_mode='Markdown',
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обрати групу", callback_data="action_setgroup")]]))
-            return
-        
-        s = get_schedule_from_db(group)
-        if not s:
-            await safe_edit(query, "ℹ️ Завантаження графіку...", reply_markup=get_main_keyboard())
-            return
-        
-        msg = format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at'])
-        await safe_edit(query, msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
-    
-    elif query.data == "action_setgroup":
-        kb = [[InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
-        await safe_edit(query, "Оберіть вашу групу відключень:", reply_markup=InlineKeyboardMarkup(kb))
-    
-    elif query.data == "action_mygroup":
-        g = get_user_group(query.from_user.id)
-        text = f"📍 Ваша група: *{g}*\n\nОберіть дію:" if g else "❌ Група не обрана\n\nОберіть дію:"
-        await safe_edit(query, text, parse_mode='Markdown', reply_markup=get_main_keyboard())
+async def safe_edit(query, text, parse_mode=None, reply_markup=None):
+    """Safe message edit that ignores 'not modified' errors"""
+    try:
+        await query.edit_message_text(text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
 
-async def start_command(update, context):
+async def start(update, context):
     await update.message.reply_text(
         "Вітаю! 👋\n\nЯ допоможу відстежувати графік відключень світла.\n\nОберіть дію:",
-        reply_markup=get_reply_keyboard()
+        reply_markup=REPLY_KEYBOARD
     )
 
-async def setgroup_command(update, context):
-    if get_user_group(update.effective_chat.id) is None and get_user_count() >= MAX_USERS:
-        await update.message.reply_text("❌ Ліміт користувачів.", reply_markup=get_reply_keyboard())
+async def show_schedule(update, context):
+    """Show schedule for user's group"""
+    chat_id = update.effective_chat.id
+    group = get_user_group(chat_id)
+    
+    if not group:
+        await update.message.reply_text("❌ Спочатку оберіть групу", reply_markup=REPLY_KEYBOARD)
         return
-    kb = [[InlineKeyboardButton(g, callback_data=f"group_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
+    
+    schedule = get_schedule(group)
+    if not schedule:
+        await update.message.reply_text("ℹ️ Завантаження графіку...", reply_markup=REPLY_KEYBOARD)
+        return
+    
+    msg = f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
+    if schedule['today']:
+        msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+    if schedule['tomorrow']:
+        msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+    if schedule['updated_at']:
+        msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+    msg += "ℹ️ _Графік може змінюватися протягом дня_"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
+
+async def show_group(update, context):
+    """Show user's current group"""
+    group = get_user_group(update.effective_chat.id)
+    text = f"📍 Ваша група: *{group}*" if group else "❌ Група не обрана"
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=REPLY_KEYBOARD)
+
+async def select_group(update, context):
+    """Show group selection menu"""
+    chat_id = update.effective_chat.id
+    user_count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
+    
+    if not get_user_group(chat_id) and user_count >= MAX_USERS:
+        await update.message.reply_text("❌ Ліміт користувачів", reply_markup=REPLY_KEYBOARD)
+        return
+    
+    kb = [[InlineKeyboardButton(g, callback_data=f"g_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
     await update.message.reply_text("Оберіть групу:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def group_selection(update, context):
+async def handle_callback(update, context):
+    """Handle all callback queries"""
     query = update.callback_query
     await query.answer()
-    group = query.data.replace("group_", "")
-    if save_user_group(query.from_user.id, group):
-        await safe_edit(query, f"✅ Групу {group} збережено!\n\nОберіть дію:", reply_markup=get_main_keyboard())
-
-async def handle_text_messages(update, context):
-    """Handle reply keyboard button presses"""
-    text = update.message.text
+    data = query.data
     
+    # Group selection
+    if data.startswith("g_"):
+        group = data[2:]
+        if save_user_group(query.from_user.id, group):
+            await safe_edit(query, f"✅ Групу {group} збережено!\n\nОберіть дію:", reply_markup=INLINE_KEYBOARD)
+        return
+    
+    # Inline menu actions
+    if data == "schedule":
+        group = get_user_group(query.from_user.id)
+        if not group:
+            await safe_edit(query, "❌ Спочатку оберіть групу", reply_markup=INLINE_KEYBOARD)
+            return
+        
+        schedule = get_schedule(group)
+        if not schedule:
+            await safe_edit(query, "ℹ️ Завантаження графіку...", reply_markup=INLINE_KEYBOARD)
+            return
+        
+        msg = f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
+        if schedule['today']:
+            msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+        if schedule['tomorrow']:
+            msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+        if schedule['updated_at']:
+            msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+        msg += "ℹ️ _Графік може змінюватися протягом дня_"
+        
+        await safe_edit(query, msg, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
+    
+    elif data == "mygroup":
+        group = get_user_group(query.from_user.id)
+        text = f"📍 Ваша група: *{group}*\n\nОберіть дію:" if group else "❌ Група не обрана\n\nОберіть дію:"
+        await safe_edit(query, text, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
+    
+    elif data == "setgroup":
+        kb = [[InlineKeyboardButton(g, callback_data=f"g_{g}") for g in GROUPS[i:i+3]] for i in range(0, len(GROUPS), 3)]
+        await safe_edit(query, "Оберіть вашу групу відключень:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def handle_text(update, context):
+    """Handle reply keyboard buttons"""
+    text = update.message.text
     if text == "📋 Графік":
-        await schedule_command(update, context)
+        await show_schedule(update, context)
     elif text == "ℹ️ Моя група":
-        await mygroup_command(update, context)
+        await show_group(update, context)
     elif text == "🔄 Змінити групу":
-        await setgroup_command(update, context)
+        await select_group(update, context)
 
-async def schedule_command(update, context):
-    group = get_user_group(update.effective_chat.id)
-    if not group:
-        await update.message.reply_text(
-            "❌ Спочатку оберіть групу:",
-            reply_markup=get_reply_keyboard()
-        )
-        return
-    s = get_schedule_from_db(group)
-    if not s:
-        await update.message.reply_text(
-            "ℹ️ Завантаження графіку...",
-            reply_markup=get_reply_keyboard()
-        )
-        return
-    await update.message.reply_text(
-        format_schedule_message(group, s['today'], s['tomorrow'], s['updated_at']), 
-        parse_mode='Markdown',
-        reply_markup=get_reply_keyboard()
-    )
-
-async def mygroup_command(update, context):
-    g = get_user_group(update.effective_chat.id)
-    text = f"📍 Ваша група: *{g}*" if g else "❌ Група не обрана"
-    await update.message.reply_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=get_reply_keyboard()
-    )
-
-async def stop_command(update, context):
-    if delete_user(update.effective_chat.id):
-        await update.message.reply_text("✅ Ви відписані від сповіщень.\n\nЩоб підписатись знову, натисніть /start")
-    else:
-        await update.message.reply_text("ℹ️ Ви не були підписані на сповіщення.")
+async def stop(update, context):
+    """Unsubscribe user"""
+    deleted = db_execute('DELETE FROM users WHERE chat_id = ?', (update.effective_chat.id,)).rowcount > 0
+    text = "✅ Ви відписані від сповіщень.\n\nЩоб підписатись знову, натисніть /start" if deleted else "ℹ️ Ви не були підписані"
+    await update.message.reply_text(text)
 
 # =============================================================================
 # FLASK API
@@ -555,61 +509,67 @@ async def stop_command(update, context):
 
 flask_app = Flask(__name__)
 
-@flask_app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy', 'users': get_user_count()}), 200
+@flask_app.route('/health')
+def health():
+    count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
+    return jsonify({'status': 'healthy', 'users': count})
 
-@flask_app.route('/api/users', methods=['GET'])
-def get_users_api():
-    auth = request.headers.get('Authorization')
-    if not auth or auth.replace('Bearer ', '') != API_SECRET:
+@flask_app.route('/api/users')
+def api_users():
+    auth = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if auth != API_SECRET:
         return jsonify({'error': 'Unauthorized'}), 401
     users = get_all_users()
-    return jsonify({'users': users, 'count': len(users)}), 200
+    return jsonify({'users': users, 'count': len(users)})
 
 @flask_app.route('/webhook', methods=['POST'])
-def webhook_handler():
+def webhook():
     update_queue.put(request.get_json(force=True))
-    return 'OK', 200
+    return 'OK'
 
 # =============================================================================
-# APP RUNNERS
+# APP SETUP
 # =============================================================================
 
-async def process_queue_updates():
+async def process_updates():
+    """Process updates from queue"""
     while True:
         if not update_queue.empty():
-            data = update_queue.get()
             try:
+                data = update_queue.get()
                 update = Update.de_json(data, bot_app.bot)
                 await bot_app.process_update(update)
             except Exception as e:
-                logger.error(f"Queue error: {e}")
+                logger.error(f"Update error: {e}")
         await asyncio.sleep(0.1)
 
-async def setup_application():
+async def setup():
+    """Setup Telegram bot"""
     global bot_app
     bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler('start', start_command))
-    bot_app.add_handler(CommandHandler('setgroup', setgroup_command))
-    bot_app.add_handler(CommandHandler('schedule', schedule_command))
-    bot_app.add_handler(CommandHandler('mygroup', mygroup_command))
-    bot_app.add_handler(CommandHandler('stop', stop_command))
-    bot_app.add_handler(CallbackQueryHandler(group_selection, pattern='^group_'))
-    bot_app.add_handler(CallbackQueryHandler(handle_inline_actions, pattern='^action_'))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
-    bot_app.add_error_handler(error_handler)
+    
+    # Commands
+    bot_app.add_handler(CommandHandler('start', start))
+    bot_app.add_handler(CommandHandler('schedule', show_schedule))
+    bot_app.add_handler(CommandHandler('mygroup', show_group))
+    bot_app.add_handler(CommandHandler('setgroup', select_group))
+    bot_app.add_handler(CommandHandler('stop', stop))
+    
+    # Callbacks and text
+    bot_app.add_handler(CallbackQueryHandler(handle_callback))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
 
 def run_bot():
+    """Run bot in separate thread"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(setup_application())
-    loop.create_task(process_queue_updates())
-    loop.create_task(schedule_checker_loop())
+    loop.run_until_complete(setup())
+    loop.create_task(process_updates())
+    loop.create_task(checker_loop())
     loop.run_forever()
 
 if __name__ == '__main__':
