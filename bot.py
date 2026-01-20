@@ -101,100 +101,41 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    if c.fetchone():
-        c.execute("PRAGMA table_info(users)")
-        columns = [row[1] for row in c.fetchall()]
-        
-        if 'group_number' in columns or 'group' in columns:
-            logger.info("Migrating from single-group to multi-city schema...")
-            c.execute('ALTER TABLE users RENAME TO users_old')
-            
-            c.execute('''CREATE TABLE users (
-                chat_id INTEGER PRIMARY KEY,
-                city TEXT DEFAULT 'lviv',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            
-            c.execute('''CREATE TABLE user_groups (
-                chat_id INTEGER,
-                city TEXT,
-                group_number TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (chat_id, city, group_number),
-                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
-            )''')
-            
-            group_col = 'group_number' if 'group_number' in columns else 'group'
-            c.execute(f'SELECT chat_id, {group_col}, created_at FROM users_old')
-            old_users = c.fetchall()
-            
-            for chat_id, group_num, created_at in old_users:
-                c.execute('INSERT OR IGNORE INTO users (chat_id, city, created_at) VALUES (?, ?, ?)', 
-                         (chat_id, 'lviv', created_at))
-                if group_num:
-                    c.execute('INSERT OR IGNORE INTO user_groups (chat_id, city, group_number) VALUES (?, ?, ?)',
-                             (chat_id, 'lviv', group_num))
-            
-            c.execute('DROP TABLE users_old')
-            logger.info(f"Migration complete: {len(old_users)} users migrated to Lviv")
-        
-        elif 'city' not in columns:
-            logger.info("Adding city support to multi-group schema...")
-            c.execute('ALTER TABLE users ADD COLUMN city TEXT DEFAULT "lviv"')
-            
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_groups'")
-            if c.fetchone():
-                c.execute("PRAGMA table_info(user_groups)")
-                ug_columns = [row[1] for row in c.fetchall()]
-                
-                if 'city' not in ug_columns:
-                    c.execute('ALTER TABLE user_groups RENAME TO user_groups_old')
-                    c.execute('''CREATE TABLE user_groups (
-                        chat_id INTEGER,
-                        city TEXT,
-                        group_number TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (chat_id, city, group_number),
-                        FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
-                    )''')
-                    
-                    c.execute('SELECT chat_id, group_number, created_at FROM user_groups_old')
-                    old_groups = c.fetchall()
-                    for chat_id, group_num, created_at in old_groups:
-                        c.execute('INSERT INTO user_groups (chat_id, city, group_number, created_at) VALUES (?, ?, ?, ?)',
-                                 (chat_id, 'lviv', group_num, created_at))
-                    
-                    c.execute('DROP TABLE user_groups_old')
-                    logger.info(f"Migrated {len(old_groups)} group subscriptions")
-    else:
-        c.execute('''CREATE TABLE users (
+    # Users
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY,
             city TEXT DEFAULT 'lviv',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        
-        c.execute('''CREATE TABLE user_groups (
+        )
+    ''')
+    
+    # Groups
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_groups (
             chat_id INTEGER,
             city TEXT,
             group_number TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (chat_id, city, group_number),
             FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
-        )''')
+        )
+    ''')
     
-    c.execute('''CREATE TABLE IF NOT EXISTS schedules (
-        city TEXT,
-        group_number TEXT,
-        today_schedule TEXT,
-        tomorrow_schedule TEXT,
-        previous_today TEXT,
-        previous_tomorrow TEXT,
-        schedule_hash TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (city, group_number)
-    )''')
-    
+    # Schedules
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS schedules (
+            city TEXT,
+            group_number TEXT,
+            today_schedule TEXT,
+            tomorrow_schedule TEXT,
+            previous_today TEXT,
+            previous_tomorrow TEXT,
+            schedule_hash TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (city, group_number)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -299,64 +240,6 @@ def get_schedule_hash(city, group_number):
         (city, group_number), fetch_one=True
     )
     return result[0] if result else None
-
-def column_exists(table, column):
-    rows = db_execute(f"PRAGMA table_info({table})", fetch_all=True)
-    return any(r[1] == column for r in rows)
-
-def migrate_to_city_support():
-    logger.info("Running DB migration: city support")
-
-    # ---- USERS TABLE ----
-    if not column_exists("users", "city"):
-        logger.info("Adding city column to users")
-        db_execute("ALTER TABLE users ADD COLUMN city TEXT DEFAULT 'lviv'")
-
-    # Backfill users.city
-    db_execute("""
-        UPDATE users
-        SET city = 'lviv'
-        WHERE city IS NULL OR city = ''
-    """)
-
-    # ---- USER_GROUPS TABLE ----
-    if column_exists("user_groups", "group_number") and not column_exists("user_groups", "city"):
-        logger.info("Migrating user_groups to include city")
-
-        db_execute("ALTER TABLE user_groups RENAME TO user_groups_old")
-
-        db_execute("""
-            CREATE TABLE user_groups (
-                chat_id INTEGER,
-                city TEXT,
-                group_number TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (chat_id, city, group_number),
-                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
-            )
-        """)
-
-        db_execute("""
-            INSERT INTO user_groups (chat_id, city, group_number, created_at)
-            SELECT chat_id, 'lviv', group_number, created_at
-            FROM user_groups_old
-        """)
-
-        db_execute("DROP TABLE user_groups_old")
-
-    # ---- SCHEDULES TABLE ----
-    if not column_exists("schedules", "city"):
-        logger.info("Adding city column to schedules")
-        db_execute("ALTER TABLE schedules ADD COLUMN city TEXT DEFAULT 'lviv'")
-
-    # Backfill schedules.city
-    db_execute("""
-        UPDATE schedules
-        SET city = 'lviv'
-        WHERE city IS NULL OR city = ''
-    """)
-
-    logger.info("DB migration complete")
 
 # =============================================================================
 # SCHEDULE PARSING
@@ -1123,6 +1006,5 @@ def run_bot():
 
 if __name__ == '__main__':
     init_db()
-    migrate_to_city_support()
     Thread(target=run_bot, daemon=True).start()
     flask_app.run(host='0.0.0.0', port=PORT)
