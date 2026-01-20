@@ -341,7 +341,7 @@ async def check_and_notify():
         if not schedule:
             return
         
-        # Check each group for changes
+        # Process ALL groups from the fetched schedule
         changed_groups = []
         for group, data in schedule.get('groups', {}).items():
             today, tomorrow = parse_schedule_entries(data)
@@ -349,14 +349,19 @@ async def check_and_notify():
                 continue
             
             new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
-            if new_hash != get_schedule_hash(group):
+            old_hash = get_schedule_hash(group)
+            
+            # Save schedule for ALL groups (not just changed ones)
+            save_schedule(group, today or '', tomorrow or '', new_hash)
+            
+            # Track which groups changed for notifications
+            if new_hash != old_hash and old_hash is not None:
                 changed_groups.append(group)
-                save_schedule(group, today or '', tomorrow or '', new_hash)
         
         if not changed_groups:
             return
         
-        # Notify users
+        # Notify users only for changed groups
         for user in get_all_users():
             if user['group'] in changed_groups:
                 try:
@@ -452,7 +457,21 @@ async def handle_callback(update, context):
     if data.startswith("g_"):
         group = data[2:]
         if save_user_group(query.from_user.id, group):
-            await safe_edit(query, f"✅ Групу {group} збережено!\n\nОберіть дію:", reply_markup=INLINE_KEYBOARD)
+            # Try to load and show schedule immediately after group selection
+            schedule = get_schedule(group)
+            if schedule and schedule['today']:
+                msg = f"✅ Групу {group} збережено!\n\n"
+                msg += f"📋 *Графік відключень*\n\n📍 Група: *{group}*\n\n"
+                if schedule['today']:
+                    msg += "📅 *Сьогодні*\n" + format_schedule_display(schedule['today']) + "\n\n"
+                if schedule['tomorrow']:
+                    msg += "📅 *Завтра*\n" + format_schedule_display(schedule['tomorrow']) + "\n\n"
+                if schedule['updated_at']:
+                    msg += f"🕐 Оновлено: _{schedule['updated_at']}_\n"
+                msg += "ℹ️ _Графік може змінюватися протягом дня_"
+                await safe_edit(query, msg, parse_mode='Markdown', reply_markup=INLINE_KEYBOARD)
+            else:
+                await safe_edit(query, f"✅ Групу {group} збережено!\n\nℹ️ Графік ще не завантажено. Спробуйте пізніше або натисніть 📋 Графік.", reply_markup=INLINE_KEYBOARD)
         return
     
     # Inline menu actions
