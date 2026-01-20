@@ -335,17 +335,28 @@ async def check_and_notify():
         scraper = ScheduleScraper()
         json_content = scraper.fetch_schedule()
         if not json_content:
+            logger.warning("Failed to fetch schedule from API")
             return
         
         schedule = scraper.parse_schedule(json_content)
         if not schedule:
+            logger.warning("Failed to parse schedule")
             return
+        
+        groups_data = schedule.get('groups', {})
+        if not groups_data:
+            logger.warning("No groups found in schedule")
+            return
+        
+        logger.info(f"Processing {len(groups_data)} groups from schedule")
         
         # Process ALL groups from the fetched schedule
         changed_groups = []
-        for group, data in schedule.get('groups', {}).items():
+        saved_count = 0
+        for group, data in groups_data.items():
             today, tomorrow = parse_schedule_entries(data)
             if not today:
+                logger.warning(f"No schedule found for group {group}")
                 continue
             
             new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
@@ -353,10 +364,14 @@ async def check_and_notify():
             
             # Save schedule for ALL groups (not just changed ones)
             save_schedule(group, today or '', tomorrow or '', new_hash)
+            saved_count += 1
+            logger.info(f"Saved schedule for group {group}")
             
             # Track which groups changed for notifications
             if new_hash != old_hash and old_hash is not None:
                 changed_groups.append(group)
+        
+        logger.info(f"Saved schedules for {saved_count} groups, {len(changed_groups)} changed")
         
         if not changed_groups:
             return
@@ -377,7 +392,7 @@ async def check_and_notify():
                     logger.error(f"Notify error {user['chat_id']}: {e}")
                     
     except Exception as e:
-        logger.error(f"Checker error: {e}")
+        logger.error(f"Checker error: {e}", exc_info=True)
 
 async def checker_loop():
     """Background loop to check schedules"""
