@@ -36,7 +36,7 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 MAX_USERS = 25
 DB_PATH = '/data/users.db'
-GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 4)]
+GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in range(1, 3)]  # Only X.1 and X.2 exist!
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
