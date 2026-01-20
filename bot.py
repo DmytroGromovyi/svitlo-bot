@@ -46,7 +46,7 @@ CITIES = {
         'emoji': '🦁'
     },
     'ivano-frankivsk': {
-        'name': 'Франківська область',
+        'name': 'Івано-Франківська область',
         'groups': [f"{i}.{j}" for i in range(1, 7) for j in range(1, 3)],  # 1.1, 1.2, 2.1, 2.2, ..., 6.2
         'emoji': '🏔'
     }
@@ -66,7 +66,7 @@ update_queue = Queue()
 REPLY_KEYBOARD = ReplyKeyboardMarkup([
     [KeyboardButton("📋 Графік"), KeyboardButton("ℹ️ Мої групи")],
     [KeyboardButton("➕ Додати групу"), KeyboardButton("➖ Видалити групу")],
-    [KeyboardButton("🏙 Міста")]
+    [KeyboardButton("🏙 Області")]
 ], resize_keyboard=True)
 
 def get_inline_keyboard(has_groups=True):
@@ -998,7 +998,7 @@ async def handle_text(update, context):
         await add_group(update, context)
     elif text == "➖ Видалити групу":
         await remove_group(update, context)
-    elif text == "🏙 Міста":
+    elif text == "🏙 Області":
         await show_cities(update, context)
 
 async def stop(update, context):
