@@ -300,6 +300,64 @@ def get_schedule_hash(city, group_number):
     )
     return result[0] if result else None
 
+def column_exists(table, column):
+    rows = db_execute(f"PRAGMA table_info({table})", fetch_all=True)
+    return any(r[1] == column for r in rows)
+
+def migrate_to_city_support():
+    logger.info("Running DB migration: city support")
+
+    # ---- USERS TABLE ----
+    if not column_exists("users", "city"):
+        logger.info("Adding city column to users")
+        db_execute("ALTER TABLE users ADD COLUMN city TEXT DEFAULT 'lviv'")
+
+    # Backfill users.city
+    db_execute("""
+        UPDATE users
+        SET city = 'lviv'
+        WHERE city IS NULL OR city = ''
+    """)
+
+    # ---- USER_GROUPS TABLE ----
+    if column_exists("user_groups", "group_number") and not column_exists("user_groups", "city"):
+        logger.info("Migrating user_groups to include city")
+
+        db_execute("ALTER TABLE user_groups RENAME TO user_groups_old")
+
+        db_execute("""
+            CREATE TABLE user_groups (
+                chat_id INTEGER,
+                city TEXT,
+                group_number TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, city, group_number),
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )
+        """)
+
+        db_execute("""
+            INSERT INTO user_groups (chat_id, city, group_number, created_at)
+            SELECT chat_id, 'lviv', group_number, created_at
+            FROM user_groups_old
+        """)
+
+        db_execute("DROP TABLE user_groups_old")
+
+    # ---- SCHEDULES TABLE ----
+    if not column_exists("schedules", "city"):
+        logger.info("Adding city column to schedules")
+        db_execute("ALTER TABLE schedules ADD COLUMN city TEXT DEFAULT 'lviv'")
+
+    # Backfill schedules.city
+    db_execute("""
+        UPDATE schedules
+        SET city = 'lviv'
+        WHERE city IS NULL OR city = ''
+    """)
+
+    logger.info("DB migration complete")
+
 # =============================================================================
 # SCHEDULE PARSING
 # =============================================================================
@@ -1065,5 +1123,6 @@ def run_bot():
 
 if __name__ == '__main__':
     init_db()
+    migrate_to_city_support()
     Thread(target=run_bot, daemon=True).start()
     flask_app.run(host='0.0.0.0', port=PORT)
