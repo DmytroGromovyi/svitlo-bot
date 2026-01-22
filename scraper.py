@@ -22,7 +22,7 @@ CITY_CONFIGS = {
         'source_type': 'api',  # Uses API endpoint
     },
     'ivano-frankivsk': {
-        'name': 'Івано-Франківська область',
+        'name': 'Франківська область',
         'url': 'https://github.com/yaroslav2901/OE_OUTAGE_DATA/blob/main/data/Prykarpattiaoblenerho.json',
         'api_url': 'https://raw.githubusercontent.com/yaroslav2901/OE_OUTAGE_DATA/main/data/Prykarpattiaoblenerho.json',
         'source_type': 'github_json',  # Direct JSON from GitHub
@@ -134,67 +134,63 @@ class ScheduleScraper:
         return schedule_data
     
     def _parse_github_json(self, data):
-        """Parse Ivano-Frankivsk GitHub JSON format"""
+        """Parse Ivano-Frankivsk GitHub JSON format with multiple timestamps"""
         schedule_data = {
             'timestamp': datetime.now().isoformat(),
             'groups': {}
         }
         
-        # The GitHub JSON structure:
-        # {
-        #   "fact": {
-        #     "data": {
-        #       "timestamp": {
-        #         "GPV1.1": {"1": "yes", "2": "yes", ..., "24": "yes"},
-        #         "GPV1.2": {...}
-        #       }
-        #     }
-        #   },
-        #   "preset": {
-        #     "time_zone": {"1": ["01-02", "00:00", "01:00"], ...}
-        #   }
-        # }
-        
         fact = data.get('fact', {})
         fact_data = fact.get('data', {})
         preset = data.get('preset', {})
         time_zone = preset.get('time_zone', {})
+        today_timestamp = fact.get('today')
         
-        # Get the timestamp key (should be only one)
         if not fact_data:
             logger.warning("No fact data found in Ivano-Frankivsk JSON")
             return schedule_data
         
-        # Get the first (and should be only) timestamp entry
-        timestamp_key = list(fact_data.keys())[0]
-        groups_data = fact_data[timestamp_key]
+        # Sort timestamps to get today and tomorrow
+        timestamps = sorted([int(ts) for ts in fact_data.keys()])
         
-        # Process each group (GPV1.1, GPV1.2, etc.)
-        for group_key, hours in groups_data.items():
-            # Convert GPV1.1 to 1.1 format
-            if not group_key.startswith('GPV'):
-                continue
+        logger.info(f"Found {len(timestamps)} timestamp(s) in data: {timestamps}")
+        
+        # Process each timestamp
+        for idx, timestamp in enumerate(timestamps):
+            timestamp_str = str(timestamp)
+            groups_data = fact_data[timestamp_str]
             
-            group_num = group_key.replace('GPV', '')
+            # Determine if this is today or tomorrow
+            if timestamp == today_timestamp or idx == 0:
+                date_label = f'Сьогодні ({fact.get("update", "")})'
+            else:
+                date_label = 'Завтра'
             
-            # Build schedule text from hourly data
-            schedule_text = self._build_schedule_from_hours(hours, time_zone)
+            logger.info(f"Processing timestamp {timestamp} as '{date_label}'")
             
-            if group_num not in schedule_data['groups']:
-                schedule_data['groups'][group_num] = []
-            
-            # Add today's schedule
-            update_time = fact.get('update', datetime.now().strftime('%d.%m.%Y %H:%M'))
-            schedule_data['groups'][group_num].append({
-                'date': f'Сьогодні ({update_time})',
-                'schedule': schedule_text
-            })
+            # Process each group
+            for group_key, hours in groups_data.items():
+                if not group_key.startswith('GPV'):
+                    continue
+                
+                group_num = group_key.replace('GPV', '')
+                
+                # Build schedule text from hourly data
+                schedule_text = self._build_schedule_from_hours(hours, time_zone)
+                
+                if group_num not in schedule_data['groups']:
+                    schedule_data['groups'][group_num] = []
+                
+                schedule_data['groups'][group_num].append({
+                    'date': date_label,
+                    'schedule': schedule_text
+                })
         
         return schedule_data
     
     def _build_schedule_from_hours(self, hours, time_zone):
         """Convert hourly yes/no data to schedule text format"""
-        # Find all OFF periods (where value is "no")
+        # Find all OFF periods (where value is "no", "first", "second", or "maybe")
         off_periods = []
         start_hour = None
         
@@ -202,7 +198,8 @@ class ScheduleScraper:
             hour_str = str(hour_num)
             status = hours.get(hour_str, 'yes')
             
-            if status == 'no':
+            # Treat "no", "first", "second", and "maybe" as outages
+            if status in ['no', 'first', 'second', 'maybe']:
                 if start_hour is None:
                     start_hour = hour_num
             else:
@@ -338,6 +335,8 @@ def main():
                 print(f"\nGroups detected:")
                 for group_id, data in list(new_schedule['groups'].items())[:5]:
                     print(f"  - Group {group_id}: {len(data)} entries")
+                    for entry in data:
+                        print(f"    * {entry['date']}: {entry['schedule'][:80]}...")
                 
                 if len(new_schedule['groups']) > 5:
                     print(f"  ... and {len(new_schedule['groups']) - 5} more groups")
