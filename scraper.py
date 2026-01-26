@@ -189,40 +189,64 @@ class ScheduleScraper:
         return schedule_data
     
     def _build_schedule_from_hours(self, hours, time_zone):
-        """Convert hourly yes/no data to schedule text format"""
-        off_periods = []
-        start_hour = None
+        """Convert hourly yes/no data to schedule text format with partial hour support"""
+        
+        # Build list of outage segments with exact times
+        outage_segments = []
         
         for hour_num in range(1, 25):
             hour_str = str(hour_num)
             status = hours.get(hour_str, 'yes')
             
-            # Treat "no", "first", "second", and "maybe" as outages
-            if status in ['no', 'first', 'second', 'maybe']:
-                if start_hour is None:
-                    start_hour = hour_num
-            else:
-                if start_hour is not None:
-                    # End of OFF period
-                    off_periods.append((start_hour, hour_num))
-                    start_hour = None
+            if status == 'yes':
+                continue
+            
+            # Get time range for this hour
+            hour_data = time_zone.get(hour_str, [None, "00:00", "01:00"])
+            hour_start = hour_data[1]  # e.g., "09:00"
+            hour_end = hour_data[2]    # e.g., "10:00"
+            
+            # Parse hour value for calculations
+            hour_val = int(hour_start.split(':')[0])
+            
+            if status == 'no' or status == 'maybe':
+                # Full hour outage
+                outage_segments.append((hour_start, hour_end))
+                
+            elif status == 'first':
+                # First 30 minutes: XX:00 - XX:30
+                outage_segments.append((hour_start, f"{hour_val:02d}:30"))
+                
+            elif status == 'second':
+                # Second 30 minutes: XX:30 - (XX+1):00
+                outage_segments.append((f"{hour_val:02d}:30", hour_end))
         
-        # If still in OFF period at end of day
-        if start_hour is not None:
-            off_periods.append((start_hour, 24))  # Changed from 25 to 24
-        
-        # Build schedule text
-        if not off_periods:
+        if not outage_segments:
             return "Відключень не заплановано"
         
+        # Merge consecutive segments
+        merged_periods = []
+        current_start = outage_segments[0][0]
+        current_end = outage_segments[0][1]
+        
+        for i in range(1, len(outage_segments)):
+            seg_start, seg_end = outage_segments[i]
+            
+            # If this segment starts where the last one ended, merge them
+            if seg_start == current_end:
+                current_end = seg_end
+            else:
+                # Save the current period and start a new one
+                merged_periods.append((current_start, current_end))
+                current_start = seg_start
+                current_end = seg_end
+        
+        # Don't forget the last period
+        merged_periods.append((current_start, current_end))
+        
+        # Build schedule text
         parts = []
-        for start, end in off_periods:
-            # Get time strings from time_zone
-            start_time = time_zone.get(str(start), [None, "00:00", "01:00"])[1]
-            
-            # Use end of the LAST hour with outage instead of start of next hour
-            end_time = time_zone.get(str(end), [None, "23:00", "24:00"])[2]
-            
+        for start_time, end_time in merged_periods:
             parts.append(f"з {start_time} до {end_time}")
         
         return "Відключення електроенергії: " + ", ".join(parts)
