@@ -190,7 +190,6 @@ class ScheduleScraper:
     
     def _build_schedule_from_hours(self, hours, time_zone):
         """Convert hourly yes/no data to schedule text format"""
-        # Find all OFF periods (where value is "no", "first", "second", or "maybe")
         off_periods = []
         start_hour = None
         
@@ -210,7 +209,7 @@ class ScheduleScraper:
         
         # If still in OFF period at end of day
         if start_hour is not None:
-            off_periods.append((start_hour, 25))  # 25 represents end of day (24:00)
+            off_periods.append((start_hour, 24))  # Changed from 25 to 24
         
         # Build schedule text
         if not off_periods:
@@ -220,11 +219,9 @@ class ScheduleScraper:
         for start, end in off_periods:
             # Get time strings from time_zone
             start_time = time_zone.get(str(start), [None, "00:00", "01:00"])[1]
-            end_time = time_zone.get(str(end - 1), [None, "23:00", "24:00"])[2]
             
-            # Handle end of day
-            if end == 25:
-                end_time = "24:00"
+            # Use end of the LAST hour with outage instead of start of next hour
+            end_time = time_zone.get(str(end), [None, "23:00", "24:00"])[2]
             
             parts.append(f"з {start_time} до {end_time}")
         
