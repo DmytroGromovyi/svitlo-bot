@@ -226,8 +226,8 @@ def save_schedule(city, group_number, today, tomorrow, schedule_hash):
     db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(city, group_number) DO UPDATE SET
-            previous_today = schedules.today_schedule,
-            previous_tomorrow = schedules.tomorrow_schedule,
+            previous_today = EXCLUDED.previous_today,
+            previous_tomorrow = EXCLUDED.previous_tomorrow,
             today_schedule = excluded.today_schedule,
             tomorrow_schedule = excluded.tomorrow_schedule,
             schedule_hash = excluded.schedule_hash,
@@ -472,7 +472,8 @@ async def check_and_notify():
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                if new_hash != old_hash and old_hash is not None:
+                # Notify on change OR first time (when old_hash is None)
+                if old_hash is None or new_hash != old_hash:
                     changed_groups.append(group)
             
             logger.info(f"Saved {saved_count} {city_id} groups, {len(changed_groups)} changed")
