@@ -260,7 +260,6 @@ class ScheduleScraper:
         relevant_data = {
             'groups': data.get('groups', {})
         }
-        }
         
         for group_id, entries in relevant_data['groups'].items():
             cleaned_entries = []
