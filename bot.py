@@ -124,17 +124,7 @@ def init_db():
     
     # Schedules
     c.execute('''
-        CREATE TABLE IF NOT EXISTS schedules (
-            city TEXT,
-            group_number INTEGER,
-            today_schedule TEXT,
-            tomorrow_schedule TEXT,
-            previous_today TEXT,
-            previous_tomorrow TEXT,
-            reference_date TEXT,
-            schedule_hash TEXT,
-            updated_at TEXT
-        )
+
             city TEXT,
             group_number TEXT,
             today_schedule TEXT,
