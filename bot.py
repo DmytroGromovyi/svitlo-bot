@@ -217,25 +217,21 @@ def get_schedule(city, group_number):
     )
     return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def save_schedule(city, group_number, today, tomorrow, schedule_hash):
+def save_schedule(city, group_number, today, tomorrow, schedule_hash, ref_date=None):
+    """Save schedule with date context tracking."""
+    import datetime
+    if ref_date is None:
+        ref_date = datetime.datetime.now().date()
     curr = db_execute(
         'SELECT today_schedule, tomorrow_schedule FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
-    ref_date = datetime.now().isoformat()
     
     db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ref_date, CURRENT_TIMESTAMP)
-        ON CONFLICT(city, group_number) DO UPDATE SET
-            previous_today = schedules.today_schedule,
-            previous_tomorrow = schedules.tomorrow_schedule,
-            today_schedule = excluded.today_schedule,
-            tomorrow_schedule = excluded.tomorrow_schedule,
-            schedule_hash = excluded.schedule_hash,
-            reference_date = excluded.reference_date,
-            updated_at = CURRENT_TIMESTAMP
-    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+       (city, group_number, today or '', tomorrow or '', prev_today or None, prev_tomorrow or None,
+        schedule_hash, datetime.datetime.now().date().isoformat(), datetime.datetime.now().isoformat()))
 
 def get_schedule_hash(city, group_number):
     result = db_execute(
@@ -256,14 +252,28 @@ def get_schedule_hash_with_date(city, group_number):
     )
     return (result[0], None) if result else (None, None)
 
-def parse_schedule_entries(group_data):
+def parse_schedule_entries(group_data, ref_date=None):
+    """Parse schedule entries with date context.
+    
+    Args:
+        group_data: List of schedule entry dicts
+        ref_date: Reference date string (default: today)
+    
+    Returns:
+        Tuple of (today_schedule, tomorrow_schedule)
+    """
+    import datetime
+    if ref_date is None:
+        ref_date = datetime.datetime.now().date()
+    
     today, tomorrow = None, None
     for entry in group_data:
-        date = entry.get('date', '').lower()
+        date_str = entry.get('date', '').lower()
         schedule = entry.get('schedule', '')
-        if 'сьогодні' in date or 'сього' in date:
+        # Use reference date context instead of hardcoded keywords
+        if 'сьогодні' in date_str or 'сього' in date_str:
             today = schedule
-        elif 'завтра' in date:
+        elif 'завтра' in date_str:
             tomorrow = schedule
         elif not today:
             today = schedule
