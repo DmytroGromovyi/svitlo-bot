@@ -216,9 +216,9 @@ def get_schedule(city, group_number):
     )
     return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def save_schedule(city, group_number, today, tomorrow, schedule_hash):
+def save_schedule(city, group_number, today, tomorrow, reference_date, schedule_hash):
     curr = db_execute(
-        'SELECT today_schedule, tomorrow_schedule FROM schedules WHERE city = ? AND group_number = ?', 
+        'SELECT today_schedule, tomorrow_schedule, reference_date FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
@@ -472,7 +472,8 @@ async def check_and_notify():
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                if new_hash != old_hash and old_hash is not None:
+                # Check if hash changed OR if it's the first run (old_hash is None)
+                if old_hash is None or new_hash != old_hash:
                     changed_groups.append(group)
             
             logger.info(f"Saved {saved_count} {city_id} groups, {len(changed_groups)} changed")
