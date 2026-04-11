@@ -256,8 +256,10 @@ class ScheduleScraper:
         if not data:
             return None
         
+        # The hash must include the reference date to prevent false positives at midnight
         relevant_data = {
             'groups': data.get('groups', {})
+        }
         }
         
         for group_id, entries in relevant_data['groups'].items():
@@ -293,25 +295,49 @@ class ScheduleScraper:
         
         new_hash = self.calculate_hash(new_schedule)
         
-        # Get old hash for this city
+        # Get old state for this city (hash + date)
         city_data = self.schedules.get(self.city, {})
-        old_hash = city_data.get('last_hash')
-        
+        old_state = city_data.get('last_state') # Expecting 'last_state' to be a composite string
+
+        current_date_str = datetime.now().strftime('%Y-%m-%d')
+        new_state = f"{new_hash}|{current_date_str}"
+        old_state_for_comparison = city_data.get('last_state') # Use the stored state for comparison
+
+        # Check if content changed OR if we crossed a date boundary (and thus need to re-evaluate)
+        if old_state_for_comparison is None:
+            is_changed = True # Always notify on first run
+        elif new_hash != self.calculate_hash(city_data.get('last_schedule', {}).get('groups', {})):
+             # Content changed, definitely notify
+            is_changed = True
+        elif old_state_for_comparison[:10] != current_date_str:
+            # Date boundary crossed (e.g., yesterday's check vs today's check) AND content is stable -> Treat as change to force re-evaluation/notification if needed, or handle gracefully.
+            # For now, we assume that crossing a date boundary *is* a state change requiring notification unless the user explicitly says otherwise.
+            # However, to fix the false positive: If content is identical AND the date has advanced, it should NOT notify.
+            if new_hash == self.calculate_hash(city_data.get('last_schedule', {}).get('groups', {}')):
+                is_changed = False # Content stable across midnight -> NO notification
+            else:
+                 # This path shouldn't be hit if the above logic is correct, but for safety:
+                is_changed = True 
+        elif new_hash != old_hash:
+             # Should not happen due to previous checks, but fallback
+            is_changed = True
+        else:
+            is_changed = False
+
         result = {
-            'changed': new_hash != old_hash,
+            'changed': is_changed,
             'new_schedule': new_schedule,
             'old_schedule': city_data.get('last_schedule'),
             'new_hash': new_hash,
-            'old_hash': old_hash,
+            'old_state': old_state_for_comparison, # Store the full state for next time
             'timestamp': datetime.now().isoformat(),
             'city': self.city
         }
         
         if result['changed']:
             logger.info(f"🔔 {self.config['name']} schedule has changed! Old hash: {old_hash}, New hash: {new_hash}")
-            self.schedules[self.city]['last_hash'] = new_hash
-            self.schedules[self.city]['last_schedule'] = new_schedule
-            self.schedules[self.city]['last_checked'] = datetime.now().isoformat()
+            self.schedules[self.city]['last_state'] = new_state # Store the full state for next time
++            logger.info(f"🔔 {self.config['name']} schedule has changed! Old State: {old_state_for_comparison}, New State: {new_state}")
             self._save_schedules()
         else:
             logger.info(f"✓ No changes detected in {self.config['name']} schedule")
