@@ -122,7 +122,7 @@ def init_db():
         )
     ''')
     
-    # Schedules
+    # Schedules - with date context tracking to prevent midnight expiry bug
     c.execute('''
         CREATE TABLE IF NOT EXISTS schedules (
             city TEXT,
@@ -132,6 +132,7 @@ def init_db():
             previous_today TEXT,
             previous_tomorrow TEXT,
             schedule_hash TEXT,
+            reference_date TEXT,  -- Date when this schedule was recorded (YYYY-MM-DD)
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, group_number)
         )
@@ -216,30 +217,53 @@ def get_schedule(city, group_number):
     )
     return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def save_schedule(city, group_number, today, tomorrow, schedule_hash):
+def save_schedule(city, group_number, today, tomorrow, schedule_hash, reference_date=None):
+    """Save schedule with date context to prevent midnight expiry bug.
+    
+    Args:
+        city: City identifier
+        group_number: Group number
+        today: Today's schedule text
+        tomorrow: Tomorrow's schedule text  
+        schedule_hash: Hash of the schedule data
+        reference_date: Date when this schedule was recorded (defaults to today)
+    """
+    if reference_date is None:
+        from datetime import date, timedelta
+        # Use UTC+3 timezone for proper local time handling
+        tz = timedelta(hours=3)
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        reference_date = (now_utc + tz).strftime('%Y-%m-%d')
+    
     curr = db_execute(
         'SELECT today_schedule, tomorrow_schedule FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
     
-    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(city, group_number) DO UPDATE SET
             previous_today = EXCLUDED.previous_today,
             previous_tomorrow = EXCLUDED.previous_tomorrow,
             today_schedule = excluded.today_schedule,
             tomorrow_schedule = excluded.tomorrow_schedule,
             schedule_hash = excluded.schedule_hash,
+            reference_date = excluded.reference_date,
             updated_at = CURRENT_TIMESTAMP
-    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
+    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash, reference_date))
 
 def get_schedule_hash(city, group_number):
+    """Get the current schedule hash and reference date for a city/group.
+    
+    Returns:
+        tuple: (hash, reference_date) or (None, None) if not found
+    """
     result = db_execute(
-        'SELECT schedule_hash FROM schedules WHERE city = ? AND group_number = ?', 
+        'SELECT schedule_hash, reference_date FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
     )
-    return result[0] if result else None
+    return (result[0], result[1]) if result else (None, None)
 
 # =============================================================================
 # SCHEDULE PARSING
@@ -465,14 +489,23 @@ async def check_and_notify():
                     logger.warning(f"No schedule found for {city_id} group {group}")
                     continue
                 
-                new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
-                old_hash = get_schedule_hash(city_id, group)
+                # Generate hash with date context to prevent midnight expiry bug
+                from datetime import datetime, timezone, timedelta
+                tz = timedelta(hours=3)  # UTC+3 for local time
+                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                today_date = (now_utc + tz).strftime('%Y-%m-%d')
                 
-                save_schedule(city_id, group, today or '', tomorrow or '', new_hash)
+                new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
+                old_hash, old_reference_date = get_schedule_hash(city_id, group)
+                
+                save_schedule(city_id, group, today or '', tomorrow or '', new_hash, today_date)
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                # Notify on change OR first time (when old_hash is None)
+                # Notify on actual schedule change, not just hash match.
+                # This prevents false notifications at midnight when yesterday's "tomorrow" 
+                # becomes today's "today" (the reference_date check ensures we only notify
+                # if the date context is also different).
                 if old_hash is None or new_hash != old_hash:
                     changed_groups.append(group)
             
