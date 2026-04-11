@@ -228,7 +228,7 @@ def save_schedule(city, group_number, today, tomorrow, schedule_hash, ref_date=N
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
     
-    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
+    db_execute('''INSERT OR REPLACE INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
        (city, group_number, today or '', tomorrow or '', prev_today or None, prev_tomorrow or None,
         schedule_hash, datetime.datetime.now().date().isoformat(), datetime.datetime.now().isoformat()))
