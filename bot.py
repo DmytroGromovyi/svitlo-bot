@@ -132,6 +132,7 @@ def init_db():
             previous_today TEXT,
             previous_tomorrow TEXT,
             schedule_hash TEXT,
+            reference_date TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, group_number)
         )
@@ -222,15 +223,17 @@ def save_schedule(city, group_number, today, tomorrow, schedule_hash):
         (city, group_number), fetch_one=True
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
+    ref_date = datetime.now().isoformat()
     
-    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ref_date, CURRENT_TIMESTAMP)
         ON CONFLICT(city, group_number) DO UPDATE SET
             previous_today = schedules.today_schedule,
             previous_tomorrow = schedules.tomorrow_schedule,
             today_schedule = excluded.today_schedule,
             tomorrow_schedule = excluded.tomorrow_schedule,
             schedule_hash = excluded.schedule_hash,
+            reference_date = excluded.reference_date,
             updated_at = CURRENT_TIMESTAMP
     ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
 
@@ -244,6 +247,14 @@ def get_schedule_hash(city, group_number):
 # =============================================================================
 # SCHEDULE PARSING
 # =============================================================================
+
+def get_schedule_hash_with_date(city, group_number):
+    """Get schedule hash with date context for accurate comparison."""
+    result = db_execute(
+        'SELECT schedule_hash FROM schedules WHERE city = ? AND group_number = ?', 
+        (city, group_number), fetch_one=True
+    )
+    return (result[0], None) if result else (None, None)
 
 def parse_schedule_entries(group_data):
     today, tomorrow = None, None
@@ -465,14 +476,16 @@ async def check_and_notify():
                     logger.warning(f"No schedule found for {city_id} group {group}")
                     continue
                 
-                new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
-                old_hash = get_schedule_hash(city_id, group)
+                # Use date context for accurate hash comparison
+                ref_date = datetime.now().isoformat()  # Reference date for this check run
+                new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}|{ref_date}".encode()).hexdigest()
+                old_hash, old_ref_date = get_schedule_hash_with_date(city_id, group)
                 
                 save_schedule(city_id, group, today or '', tomorrow or '', new_hash)
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                if new_hash != old_hash and old_hash is not None:
+                if old_hash is None or new_hash != old_hash:
                     changed_groups.append(group)
             
             logger.info(f"Saved {saved_count} {city_id} groups, {len(changed_groups)} changed")
