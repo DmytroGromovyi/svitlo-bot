@@ -130,9 +130,14 @@ def init_db():
             today_schedule TEXT,
             tomorrow_schedule TEXT,
             previous_today TEXT,
+<<<<<<< HEAD
             previous_tomorrow TEXT,
             schedule_hash TEXT,
             reference_date TEXT,  -- Date when this schedule was recorded (YYYY-MM-DD)
+=======
+            reference_date TEXT NOT NULL DEFAULT CURRENT_DATE,
+            reference_date TEXT,
+>>>>>>> c0b9f1aa0538c45bee1bbcabbd9b815d72046118
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, group_number)
         )
