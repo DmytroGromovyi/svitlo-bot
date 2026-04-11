@@ -126,6 +126,16 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS schedules (
             city TEXT,
+            group_number INTEGER,
+            today_schedule TEXT,
+            tomorrow_schedule TEXT,
+            previous_today TEXT,
+            previous_tomorrow TEXT,
+            reference_date TEXT,
+            schedule_hash TEXT,
+            updated_at TEXT
+        )
+            city TEXT,
             group_number TEXT,
             today_schedule TEXT,
             tomorrow_schedule TEXT,
@@ -216,7 +226,19 @@ def get_schedule(city, group_number):
     )
     return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def save_schedule(city, group_number, today, tomorrow, schedule_hash):
+def save_schedule(city, group_number, today, tomorrow, reference_date, schedule_hash):
+        # Check if record exists to prevent unnecessary writes/updates
+        result = conn.execute('SELECT * FROM schedules WHERE city = ? AND group_number = ?', (city, group_number)).fetchone()
+
+        if result:
+            # Update existing record
+            conn.execute('''UPDATE schedules SET today_schedule=?, tomorrow_schedule=?, reference_date=?, schedule_hash=?, updated_at=? WHERE city=? AND group_number=?''',
+                         (today, tomorrow, reference_date, schedule_hash, datetime.now().isoformat(), city, group_number))
+        else:
+            # Insert new record
+            conn.execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, reference_date, schedule_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                         (city, group_number, today, tomorrow, reference_date, schedule_hash, datetime.now().isoformat()))
+        conn.commit()
     curr = db_execute(
         'SELECT today_schedule, tomorrow_schedule FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
