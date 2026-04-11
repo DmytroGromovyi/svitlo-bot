@@ -251,8 +251,9 @@ class ScheduleScraper:
         
         return "Відключення електроенергії: " + ", ".join(parts)
     
-    def calculate_hash(self, data):
-        """Calculate hash only from schedule content, ignore timestamps"""
+def calculate_hash(self, data, reference_date):
+    # Include the date context in the hash calculation for boundary safety
+    return hashlib.sha256(f"{data}:{reference_date}".encode('utf-8')).hexdigest()
         if not data:
             return None
         
@@ -269,8 +270,9 @@ class ScheduleScraper:
                 cleaned_entries.append(cleaned_entry)
             relevant_data['groups'][group_id] = cleaned_entries
         
-        json_str = json.dumps(relevant_data, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
+def calculate_hash(self, data, reference_date):
+    # Include the date context in the hash calculation for boundary safety
+    return hashlib.sha256(f"{data}:{reference_date}".encode('utf-8')).hexdigest()
     
     def check_for_changes(self):
         """Check if schedule has changed for this city"""
@@ -300,7 +302,7 @@ class ScheduleScraper:
         reference_date = datetime.now().strftime('%Y-%m-%d')
 
         result = {
-            'changed': new_hash != old_hash,
+            'changed': old_hash is None or new_hash != old_hash and reference_date != city_data.get('reference_date'),
             'new_schedule': new_schedule,
             'old_schedule': city_data.get('last_schedule'),
             'new_hash': new_hash,
