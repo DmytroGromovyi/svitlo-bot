@@ -256,8 +256,11 @@ class ScheduleScraper:
         if not data:
             return None
         
+        # The hash must include the reference date to prevent false positives at midnight
         relevant_data = {
-            'groups': data.get('groups', {})
+            'groups': data.get('groups', {}),
+            'reference_date': datetime.now().strftime('%Y-%m-%d') # Add current date context
+        }
         }
         
         for group_id, entries in relevant_data['groups'].items():
