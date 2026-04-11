@@ -296,15 +296,19 @@ class ScheduleScraper:
         # Get old hash for this city
         city_data = self.schedules.get(self.city, {})
         old_hash = city_data.get('last_hash')
-        
+        # Determine the reference date for comparison (today's date)
+        reference_date = datetime.now().strftime('%Y-%m-%d')
+
         result = {
             'changed': new_hash != old_hash,
             'new_schedule': new_schedule,
             'old_schedule': city_data.get('last_schedule'),
             'new_hash': new_hash,
             'old_hash': old_hash,
+            'reference_date': reference_date, # Store the date used for hashing
             'timestamp': datetime.now().isoformat(),
             'city': self.city
+        }
         }
         
         if result['changed']:

@@ -123,6 +123,25 @@ def init_db():
     ''')
     
     # Schedules
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    # Create tables if they don't exist
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL DEFAULT 'lviv'
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_groups (
+            chat_id INTEGER,
+            group_number TEXT,
+            PRIMARY KEY (chat_id, group_number),
+            FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+        )
+    ''')
+    # Schedules now include reference_date for boundary checking
     c.execute('''
         CREATE TABLE IF NOT EXISTS schedules (
             city TEXT,
@@ -132,9 +151,13 @@ def init_db():
             previous_today TEXT,
             previous_tomorrow TEXT,
             schedule_hash TEXT,
+            reference_date TEXT NOT NULL, -- Added date context for midnight boundary fix
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, group_number)
         )
+    ''')
+    conn.commit()
+    conn.close()
     ''')
     conn.commit()
     conn.close()
