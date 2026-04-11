@@ -34,7 +34,7 @@ API_SECRET = os.getenv('API_SECRET')
 PORT = int(os.getenv('PORT', 8080))
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-MAX_USERS = 25
+MAX_USERS = 30
 MAX_GROUPS_PER_USER = 6
 DB_PATH = '/data/users.db'
 
