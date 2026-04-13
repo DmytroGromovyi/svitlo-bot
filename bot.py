@@ -479,6 +479,21 @@ async def check_and_notify():
             changed_groups = []
             saved_count = 0
             today_date = datetime.now().strftime('%Y-%m-%d')  # Reference date for this run
+            
+            # Get all stored schedules with their reference dates to detect midnight boundary refreshes
+            all_stored_schedules = {}
+            for city in CITIES.keys():
+                for group_num in range(1, 3):
+                    stored_data = get_schedule_with_date(city, group_num)
+                    if stored_data:
+                        key = f"{city}:{group_num}"
+                        all_stored_schedules[key] = {
+                            'hash': stored_data['hash'],
+                            'reference_date': stored_data['reference_date'],
+                            'today': stored_data['today'],
+                            'tomorrow': stored_data['tomorrow']
+                        }
+            
             for group, data in groups_data.items():
                 parsed_today, parsed_tomorrow = parse_schedule_entries(data)
                 if not parsed_today:
@@ -494,11 +509,34 @@ async def check_and_notify():
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                # Only notify if hash changed AND dates match (not midnight boundary issue)
-                date_changed = old_reference_date != today_date
-                hash_changed = new_hash != old_hash
+                # Check if this is a midnight boundary refresh (expired data being replaced)
+                # If old reference date was yesterday and we're refreshing today, skip notification
+                is_midnight_refresh = False
+                if old_reference_date:
+                    try:
+                        from datetime import timedelta
+                        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                        # If old reference date was yesterday and hash changed but content is similar,
+                        # it's likely a midnight boundary refresh, not a real change
+                        if old_reference_date == yesterday:
+                            # Check if the schedule content is substantially different (real change)
+                            old_today = old_data['today'] if old_data else ''
+                            old_tomorrow = old_data['tomorrow'] if old_data else ''
+                            
+                            # If both today and tomorrow are similar or empty, likely a refresh
+                            if not old_today or not old_tomorrow:
+                                is_midnight_refresh = True
+                    except Exception as e:
+                        logger.debug(f"Date comparison error: {e}")
                 
-                if hash_changed and not date_changed:  # Hash changed but same reference date
+                hash_changed = new_hash != old_hash
+                date_changed = old_reference_date != today_date
+                
+                # Only notify if:
+                # 1. Hash changed (real schedule update)
+                # 2. Not a midnight boundary refresh (expired data replacement)
+                # 3. Date context is valid (not comparing across day boundaries inappropriately)
+                if hash_changed and not date_changed and not is_midnight_refresh:
                     changed_groups.append(group)
             
             logger.info(f"Saved {saved_count} {city_id} groups, {len(changed_groups)} changed")
