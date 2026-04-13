@@ -132,6 +132,7 @@ def init_db():
             previous_today TEXT,
             previous_tomorrow TEXT,
             schedule_hash TEXT,
+            reference_date TEXT,  -- Date when this schedule was recorded (YYYY-MM-DD)
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (city, group_number)
         )
@@ -223,16 +224,17 @@ def save_schedule(city, group_number, today, tomorrow, schedule_hash):
     )
     prev_today, prev_tomorrow = (curr[0], curr[1]) if curr else (None, None)
     
-    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    db_execute('''INSERT INTO schedules (city, group_number, today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(city, group_number) DO UPDATE SET
             previous_today = schedules.today_schedule,
             previous_tomorrow = schedules.tomorrow_schedule,
             today_schedule = excluded.today_schedule,
             tomorrow_schedule = excluded.tomorrow_schedule,
             schedule_hash = excluded.schedule_hash,
+            reference_date = excluded.reference_date,
             updated_at = CURRENT_TIMESTAMP
-    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash))
+    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash, None))
 
 def get_schedule_hash(city, group_number):
     result = db_execute(
@@ -240,6 +242,23 @@ def get_schedule_hash(city, group_number):
         (city, group_number), fetch_one=True
     )
     return result[0] if result else None
+
+def get_schedule_with_date(city, group_number):
+    """Get current schedule including reference date for comparison."""
+    result = db_execute(
+        'SELECT today_schedule, tomorrow_schedule, previous_today, previous_tomorrow, schedule_hash, reference_date FROM schedules WHERE city = ? AND group_number = ?', 
+        (city, group_number), fetch_one=True
+    )
+    if not result:
+        return None
+    return {
+        'today': result[0],
+        'tomorrow': result[1],
+        'prev_today': result[2],
+        'prev_tomorrow': result[3],
+        'hash': result[4],
+        'reference_date': result[5]
+    }
 
 # =============================================================================
 # SCHEDULE PARSING
@@ -459,20 +478,27 @@ async def check_and_notify():
             
             changed_groups = []
             saved_count = 0
+            today_date = datetime.now().strftime('%Y-%m-%d')  # Reference date for this run
             for group, data in groups_data.items():
-                today, tomorrow = parse_schedule_entries(data)
-                if not today:
+                parsed_today, parsed_tomorrow = parse_schedule_entries(data)
+                if not parsed_today:
                     logger.warning(f"No schedule found for {city_id} group {group}")
                     continue
                 
-                new_hash = hashlib.sha256(f"{today}|{tomorrow or ''}".encode()).hexdigest()
-                old_hash = get_schedule_hash(city_id, group)
+                new_hash = hashlib.sha256(f"{parsed_today}|{parsed_tomorrow or ''}|{today_date}".encode()).hexdigest()
+                old_data = get_schedule_with_date(city_id, group)
+                old_hash = old_data['hash'] if old_data else None
+                old_reference_date = old_data['reference_date'] if old_data else None
                 
-                save_schedule(city_id, group, today or '', tomorrow or '', new_hash)
+                save_schedule(city_id, group, parsed_today or '', parsed_tomorrow or '', new_hash)
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
-                if new_hash != old_hash and old_hash is not None:
+                # Only notify if hash changed AND dates match (not midnight boundary issue)
+                date_changed = old_reference_date != today_date
+                hash_changed = new_hash != old_hash
+                
+                if hash_changed and not date_changed:  # Hash changed but same reference date
                     changed_groups.append(group)
             
             logger.info(f"Saved {saved_count} {city_id} groups, {len(changed_groups)} changed")
