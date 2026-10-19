@@ -1,379 +1,242 @@
-import requests
+"""Fetch and normalize outage schedules from the OE_OUTAGE_DATA repository."""
+
 import hashlib
 import json
-import os
 import logging
-import re
-from bs4 import BeautifulSoup
+import os
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# City configurations
+DATA_REPOSITORY = "https://github.com/yaroslav2901/OE_OUTAGE_DATA"
 CITY_CONFIGS = {
-    'lviv': {
-        'name': 'Львівська область',
-        'url': 'https://poweron.loe.lviv.ua/',
-        'api_url': 'https://api.loe.lviv.ua/api/menus?page=1&type=photo-grafic',
-        'source_type': 'api',  # Uses API endpoint
+    "lviv": {
+        "name": "Львівська область",
+        "api_url": "https://raw.githubusercontent.com/yaroslav2901/OE_OUTAGE_DATA/main/data/Lvivoblenerho.json",
     },
-    'ivano-frankivsk': {
-        'name': 'Франківська область',
-        'url': 'https://github.com/yaroslav2901/OE_OUTAGE_DATA/blob/main/data/Prykarpattiaoblenerho.json',
-        'api_url': 'https://raw.githubusercontent.com/yaroslav2901/OE_OUTAGE_DATA/main/data/Prykarpattiaoblenerho.json',
-        'source_type': 'github_json',  # Direct JSON from GitHub
-    }
+    "ivano-frankivsk": {
+        "name": "Франківська область",
+        "api_url": "https://raw.githubusercontent.com/yaroslav2901/OE_OUTAGE_DATA/main/data/Prykarpattiaoblenerho.json",
+    },
 }
 
+
 class ScheduleScraper:
-    def __init__(self, city='lviv', storage_path='data/schedules.json'):
+    def __init__(self, city="lviv", storage_path="data/schedules.json"):
         if city not in CITY_CONFIGS:
-            raise ValueError(f"Unknown city: {city}. Available cities: {', '.join(CITY_CONFIGS.keys())}")
-        
+            raise ValueError(f"Unknown city: {city}. Available cities: {', '.join(CITY_CONFIGS)}")
+
         self.city = city
         self.config = CITY_CONFIGS[city]
         self.storage_path = storage_path
         self.schedules = self._load_schedules()
-    
+
     def _load_schedules(self):
-        """Load previous schedules from storage"""
+        """Load previous schedules from storage."""
         try:
-            with open(self.storage_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Ensure city-based structure
-                if self.city not in data:
-                    data[self.city] = {}
+            with open(self.storage_path, "r", encoding="utf-8") as schedule_file:
+                data = json.load(schedule_file)
+                data.setdefault(self.city, {})
                 return data
         except FileNotFoundError:
             return {self.city: {}}
-    
+
     def _save_schedules(self):
-        """Save schedules to storage"""
-        os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-        with open(self.storage_path, 'w', encoding='utf-8') as f:
-            json.dump(self.schedules, f, ensure_ascii=False, indent=2)
-    
+        """Save schedules to storage."""
+        directory = os.path.dirname(self.storage_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self.storage_path, "w", encoding="utf-8") as schedule_file:
+            json.dump(self.schedules, schedule_file, ensure_ascii=False, indent=2)
+
     def fetch_schedule(self):
-        """Fetch the current schedule based on city configuration"""
+        """Fetch the city's pre-structured JSON schedule."""
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json'
-            }
-            
-            response = requests.get(self.config['api_url'], headers=headers, timeout=30)
+            response = requests.get(
+                self.config["api_url"],
+                headers={"Accept": "application/json", "User-Agent": "svitlo-bot"},
+                timeout=30,
+            )
             response.raise_for_status()
-            
-            if self.config['source_type'] == 'github_json':
-                # GitHub returns JSON directly
-                data = response.json()
-            else:
-                # API returns structured data
-                data = response.json()
-            
-            logger.info(f"✓ Fetched {self.config['name']} schedule successfully")
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object from outage data repository")
+
+            logger.info("Fetched %s schedule successfully", self.config["name"])
             return json.dumps(data, ensure_ascii=False)
-            
-        except Exception as e:
-            logger.error(f"Error fetching schedule from {self.config['name']}: {e}", exc_info=True)
+        except (requests.RequestException, ValueError) as error:
+            logger.error("Error fetching schedule from %s: %s", self.config["name"], error)
             return None
-    
+
     def parse_schedule(self, json_content):
-        """Parse schedule based on city source type"""
+        """Normalize repository JSON to the schedule structure consumed by the bot."""
         if not json_content:
             return None
-        
+
         try:
             data = json.loads(json_content)
-            
-            if self.config['source_type'] == 'github_json':
-                return self._parse_github_json(data)
-            else:
-                return self._parse_api_data(data)
-                
-        except Exception as e:
-            logger.error(f"Error parsing {self.config['name']} schedule: {e}", exc_info=True)
+            return self._parse_repository_json(data)
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as error:
+            logger.error("Error parsing %s schedule: %s", self.config["name"], error, exc_info=True)
             return None
-    
-    def _parse_api_data(self, data):
-        """Parse Lviv API data format"""
-        schedule_data = {
-            'timestamp': datetime.now().isoformat(),
-            'groups': {}
-        }
-        
-        members = data.get('hydra:member', [])
-        
-        for member in members:
-            menu_items = member.get('menuItems', [])
-            
-            for item in menu_items:
-                raw_html = item.get('rawHtml', '')
-                
-                # Parse HTML
-                soup = BeautifulSoup(raw_html, 'html.parser')
-                text = soup.get_text()
-                
-                # Extract groups
-                group_pattern = re.compile(r'Група (\d+\.\d+)\. (.+?)(?=Група \d+\.\d+\.|$)', re.DOTALL)
-                matches = group_pattern.findall(text)
-                
-                for group_num, schedule_text in matches:
-                    if group_num not in schedule_data['groups']:
-                        schedule_data['groups'][group_num] = []
-                    
-                    schedule_data['groups'][group_num].append({
-                        'date': item.get('name', ''),
-                        'schedule': schedule_text.strip()
-                    })
-        
-        return schedule_data
-    
-    def _parse_github_json(self, data):
-        """Parse Ivano-Frankivsk GitHub JSON format with multiple timestamps"""
-        schedule_data = {
-            'timestamp': datetime.now().isoformat(),
-            'groups': {}
-        }
-        
-        fact = data.get('fact', {})
-        fact_data = fact.get('data', {})
-        preset = data.get('preset', {})
-        time_zone = preset.get('time_zone', {})
-        today_timestamp = fact.get('today')
-        
-        if not fact_data:
-            logger.warning("No fact data found in Ivano-Frankivsk JSON")
-            return schedule_data
-        
-        # Sort timestamps to get today and tomorrow
-        timestamps = sorted([int(ts) for ts in fact_data.keys()])
-        
-        logger.info(f"Found {len(timestamps)} timestamp(s) in data: {timestamps}")
-        
-        # Process each timestamp
-        for idx, timestamp in enumerate(timestamps):
-            timestamp_str = str(timestamp)
-            groups_data = fact_data[timestamp_str]
-            
-            # Determine if this is today or tomorrow
-            if timestamp == today_timestamp or idx == 0:
-                date_label = f'Сьогодні ({fact.get("update", "")})'
-            else:
-                date_label = 'Завтра'
-            
-            logger.info(f"Processing timestamp {timestamp} as '{date_label}'")
-            
-            # Process each group
-            for group_key, hours in groups_data.items():
-                if not group_key.startswith('GPV'):
+
+    def _parse_repository_json(self, data):
+        fact = data.get("fact")
+        if not isinstance(fact, dict):
+            raise ValueError("Missing fact object")
+
+        fact_data = fact.get("data")
+        if not isinstance(fact_data, dict) or not fact_data:
+            raise ValueError("Missing fact.data schedules")
+
+        preset = data.get("preset") or {}
+        time_zone = preset.get("time_zone") or {}
+        today_timestamp = fact.get("today")
+        timestamps = sorted(fact_data, key=lambda value: int(value))
+        if today_timestamp is not None:
+            today_key = str(today_timestamp)
+            if today_key not in fact_data:
+                raise ValueError("fact.today does not match any fact.data timestamp")
+            timestamps.remove(today_key)
+            timestamps.insert(0, today_key)
+
+        schedule_data = {"timestamp": datetime.now().isoformat(), "groups": {}}
+        for day_index, timestamp in enumerate(timestamps):
+            groups = fact_data[timestamp]
+            if not isinstance(groups, dict):
+                raise ValueError(f"Invalid schedule data for timestamp {timestamp}")
+            date_label = f'Сьогодні ({fact.get("update", "")})' if day_index == 0 else "Завтра"
+
+            for group_key, hours in groups.items():
+                if not group_key.startswith("GPV") or not isinstance(hours, dict):
                     continue
-                
-                group_num = group_key.replace('GPV', '')
-                
-                # Build schedule text from hourly data
-                schedule_text = self._build_schedule_from_hours(hours, time_zone)
-                
-                if group_num not in schedule_data['groups']:
-                    schedule_data['groups'][group_num] = []
-                
-                schedule_data['groups'][group_num].append({
-                    'date': date_label,
-                    'schedule': schedule_text
-                })
-        
+                group_number = group_key[3:]
+                if not group_number:
+                    continue
+                schedule = self._build_schedule_from_hours(hours, time_zone)
+                schedule_data["groups"].setdefault(group_number, []).append(
+                    {"date": date_label, "schedule": schedule}
+                )
+
+        if not schedule_data["groups"]:
+            raise ValueError("No GPV groups found in outage data")
         return schedule_data
-    
-    def _build_schedule_from_hours(self, hours, time_zone):
-        """Convert hourly yes/no data to schedule text format with partial hour support"""
-        
-        # Build list of outage segments with exact times
+
+    @staticmethod
+    def _build_schedule_from_hours(hours, time_zone):
+        """Convert hourly status values into merged outage periods."""
         outage_segments = []
-        
-        for hour_num in range(1, 25):
-            hour_str = str(hour_num)
-            status = hours.get(hour_str, 'yes')
-            
-            if status == 'yes':
+        valid_statuses = {"yes", "no", "maybe", "first", "second"}
+
+        for hour_number in range(1, 25):
+            hour_key = str(hour_number)
+            status = hours.get(hour_key, "yes")
+            if status not in valid_statuses:
+                raise ValueError(f"Unknown status {status!r} for hour {hour_key}")
+            if status == "yes":
                 continue
-            
-            # Get time range for this hour
-            hour_data = time_zone.get(hour_str, [None, "00:00", "01:00"])
-            hour_start = hour_data[1]  # e.g., "09:00"
-            hour_end = hour_data[2]    # e.g., "10:00"
-            
-            # Parse hour value for calculations
-            hour_val = int(hour_start.split(':')[0])
-            
-            if status == 'no' or status == 'maybe':
-                # Full hour outage
-                outage_segments.append((hour_start, hour_end))
-                
-            elif status == 'first':
-                # First 30 minutes: XX:00 - XX:30
-                outage_segments.append((hour_start, f"{hour_val:02d}:30"))
-                
-            elif status == 'second':
-                # Second 30 minutes: XX:30 - (XX+1):00
-                outage_segments.append((f"{hour_val:02d}:30", hour_end))
-        
+
+            hour_data = time_zone.get(hour_key, [None, f"{hour_number - 1:02d}:00", f"{hour_number:02d}:00"])
+            if not isinstance(hour_data, (list, tuple)) or len(hour_data) < 3:
+                raise ValueError(f"Invalid time zone entry for hour {hour_key}")
+            start, end = hour_data[1], hour_data[2]
+            start_hour = int(start.split(":")[0])
+
+            if status in {"no", "maybe"}:
+                outage_segments.append((start, end))
+            elif status == "first":
+                outage_segments.append((start, f"{start_hour:02d}:30"))
+            else:  # second half of the hour
+                outage_segments.append((f"{start_hour:02d}:30", end))
+
         if not outage_segments:
             return "Відключень не заплановано"
-        
-        # Merge consecutive segments
+
         merged_periods = []
-        current_start = outage_segments[0][0]
-        current_end = outage_segments[0][1]
-        
-        for i in range(1, len(outage_segments)):
-            seg_start, seg_end = outage_segments[i]
-            
-            # If this segment starts where the last one ended, merge them
-            if seg_start == current_end:
-                current_end = seg_end
+        current_start, current_end = outage_segments[0]
+        for segment_start, segment_end in outage_segments[1:]:
+            if segment_start == current_end:
+                current_end = segment_end
             else:
-                # Save the current period and start a new one
                 merged_periods.append((current_start, current_end))
-                current_start = seg_start
-                current_end = seg_end
-        
-        # Don't forget the last period
+                current_start, current_end = segment_start, segment_end
         merged_periods.append((current_start, current_end))
-        
-        # Build schedule text
-        parts = []
-        for start_time, end_time in merged_periods:
-            parts.append(f"з {start_time} до {end_time}")
-        
-        return "Відключення електроенергії: " + ", ".join(parts)
-    
+
+        periods = [f"з {start} до {end}" for start, end in merged_periods]
+        return "Відключення електроенергії: " + ", ".join(periods)
+
     def calculate_hash(self, data):
-        """Calculate hash only from schedule content, ignore timestamps"""
+        """Calculate a stable hash from schedule content, ignoring timestamps."""
         if not data:
             return None
-        
         relevant_data = {
-            'groups': data.get('groups', {})
+            "groups": {
+                group_id: [{"schedule": entry.get("schedule", "")} for entry in entries]
+                for group_id, entries in data.get("groups", {}).items()
+            }
         }
-        
-        for group_id, entries in relevant_data['groups'].items():
-            cleaned_entries = []
-            for entry in entries:
-                cleaned_entry = {
-                    'schedule': entry.get('schedule', '')
-                }
-                cleaned_entries.append(cleaned_entry)
-            relevant_data['groups'][group_id] = cleaned_entries
-        
         json_str = json.dumps(relevant_data, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
-    
+        return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+
     def check_for_changes(self):
-        """Check if schedule has changed for this city"""
+        """Fetch, parse, and persist this city's latest schedule."""
         json_content = self.fetch_schedule()
         if not json_content:
-            logger.warning(f"Could not fetch schedule from {self.config['name']} API")
+            logger.warning("Could not fetch schedule from %s repository", self.config["name"])
             return None
-        
-        # Save a copy of the JSON for debugging
-        debug_path = f'data/last_fetch_{self.city}.json'
+
+        debug_path = f"data/last_fetch_{self.city}.json"
         os.makedirs(os.path.dirname(debug_path), exist_ok=True)
-        with open(debug_path, 'w', encoding='utf-8') as f:
-            f.write(json_content)
-        logger.info(f"✓ Saved {self.config['name']} JSON to {debug_path} for debugging")
-        
+        with open(debug_path, "w", encoding="utf-8") as debug_file:
+            debug_file.write(json_content)
+
         new_schedule = self.parse_schedule(json_content)
         if not new_schedule:
-            logger.warning(f"Could not parse {self.config['name']} schedule")
+            logger.warning("Could not parse %s schedule", self.config["name"])
             return None
-        
+
         new_hash = self.calculate_hash(new_schedule)
-        
-        # Get old hash for this city
-        city_data = self.schedules.get(self.city, {})
-        old_hash = city_data.get('last_hash')
-        
+        city_data = self.schedules.setdefault(self.city, {})
+        old_hash = city_data.get("last_hash")
         result = {
-            'changed': new_hash != old_hash,
-            'new_schedule': new_schedule,
-            'old_schedule': city_data.get('last_schedule'),
-            'new_hash': new_hash,
-            'old_hash': old_hash,
-            'timestamp': datetime.now().isoformat(),
-            'city': self.city
+            "changed": new_hash != old_hash,
+            "new_schedule": new_schedule,
+            "old_schedule": city_data.get("last_schedule"),
+            "new_hash": new_hash,
+            "old_hash": old_hash,
+            "timestamp": datetime.now().isoformat(),
+            "city": self.city,
         }
-        
-        if result['changed']:
-            logger.info(f"🔔 {self.config['name']} schedule has changed! Old hash: {old_hash}, New hash: {new_hash}")
-            self.schedules[self.city]['last_hash'] = new_hash
-            self.schedules[self.city]['last_schedule'] = new_schedule
-            self.schedules[self.city]['last_checked'] = datetime.now().isoformat()
-            self._save_schedules()
+
+        if result["changed"]:
+            logger.info("%s schedule has changed", self.config["name"])
+            city_data["last_hash"] = new_hash
+            city_data["last_schedule"] = new_schedule
         else:
-            logger.info(f"✓ No changes detected in {self.config['name']} schedule")
-            self.schedules[self.city]['last_checked'] = datetime.now().isoformat()
-            self._save_schedules()
-        
+            logger.info("No changes detected in %s schedule", self.config["name"])
+        city_data["last_checked"] = datetime.now().isoformat()
+        self._save_schedules()
         return result
-    
+
     def get_group_schedule(self, group_id):
-        """Get schedule for a specific group in this city"""
+        """Get the cached schedule for a group."""
         city_data = self.schedules.get(self.city, {})
-        last_schedule = city_data.get('last_schedule', {})
-        groups = last_schedule.get('groups', {})
-        return groups.get(group_id)
+        return city_data.get("last_schedule", {}).get("groups", {}).get(group_id)
+
 
 def main():
-    """Test the scraper for all cities"""
-    print("\n" + "="*60)
-    print("Testing Multi-City Power Schedule Scraper")
-    print("="*60 + "\n")
-    
+    """Fetch and report schedules for configured cities."""
     for city_id, city_config in CITY_CONFIGS.items():
-        print(f"\n{'='*60}")
-        print(f"Testing {city_config['name']} ({city_id})")
-        print(f"{'='*60}\n")
-        
         scraper = ScheduleScraper(city=city_id)
-        
         result = scraper.check_for_changes()
-        
-        if result:
-            print(f"✓ Fetch successful for {city_config['name']}")
-            print(f"✓ Changed: {result['changed']}")
-            print(f"✓ Timestamp: {result['timestamp']}")
-            print(f"✓ Hash: {result['new_hash'][:16]}...")
-            
-            new_schedule = result['new_schedule']
-            print(f"\nSchedule Data:")
-            print(f"  - Groups found: {len(new_schedule.get('groups', {}))}")
-            
-            if new_schedule.get('groups'):
-                print(f"\nGroups detected:")
-                for group_id, data in list(new_schedule['groups'].items())[:5]:
-                    print(f"  - Group {group_id}: {len(data)} entries")
-                    for entry in data:
-                        print(f"    * {entry['date']}: {entry['schedule'][:80]}...")
-                
-                if len(new_schedule['groups']) > 5:
-                    print(f"  ... and {len(new_schedule['groups']) - 5} more groups")
-            
-            print(f"\n✓ JSON saved to: data/last_fetch_{city_id}.json")
-            
-            if result['changed']:
-                print(f"\n🔔 {city_config['name']} schedule has changed!")
-            else:
-                print(f"\n✓ No changes in {city_config['name']} schedule")
-        else:
-            print(f"✗ Failed to fetch or parse {city_config['name']} schedule")
-            print("\nTroubleshooting:")
-            print(f"  1. Check your internet connection")
-            print(f"  2. Visit {city_config['url']} in your browser")
-            print(f"  3. Check data/last_fetch_{city_id}.json to see what was downloaded")
+        if not result:
+            print(f"Failed to fetch or parse {city_config['name']}")
+            continue
+        print(f"{city_config['name']}: {len(result['new_schedule']['groups'])} groups")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

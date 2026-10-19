@@ -1,17 +1,17 @@
 # ⚡ Svitlo Bot
 
-A Telegram bot that monitors power outage schedules in Lviv, Ukraine and sends instant notifications when schedules change. Because staying in the dark about the power schedule is worse than the actual blackouts.
+A Telegram bot that monitors power outage schedules in Lviv and Ivano-Frankivsk, Ukraine and sends instant notifications when schedules change. Because staying in the dark about the power schedule is worse than the actual blackouts.
 
 ## What it does
 
-Svitlo Bot scrapes power outage schedules from [poweron.loe.lviv.ua](https://poweron.loe.lviv.ua/), monitors for changes, and notifies subscribed users immediately. It shows detailed schedules with power ON/OFF times, duration calculations, and highlights what changed.
+Svitlo Bot fetches pre-structured outage schedule JSON from the [OE_OUTAGE_DATA repository](https://github.com/yaroslav2901/OE_OUTAGE_DATA), monitors for changes, and notifies subscribed users immediately. It shows detailed schedules with power ON/OFF times, duration calculations, and highlights what changed.
 
 ## Features
 
 - 🔔 Real-time notifications when schedules change
 - ⚡ Smart diff view showing added/removed time slots
 - ⏱ Automatic calculation of total outage duration
-- 📊 Support for 18 different power groups (1.1-6.3)
+- 📊 Support for 12 power groups per region (1.1-6.2)
 - 🗄️ SQLite database for user management
 - 🔄 Automatic schedule checking every 5 minutes
 - 🌐 Webhook-based Telegram integration
@@ -89,7 +89,7 @@ docker run -d \
 ## Architecture
 
 - **bot.py** - Main bot logic, Telegram handlers, notification system
-- **scraper.py** - Schedule scraper for poweron.loe.lviv.ua
+- **scraper.py** - Schedule fetcher and JSON normalizer for OE_OUTAGE_DATA
 - **SQLite DB** - User subscriptions and schedule cache
 - **Flask** - Webhook receiver and API endpoints
 
@@ -98,7 +98,7 @@ docker run -d \
 - Python 3
 - python-telegram-bot
 - Flask
-- BeautifulSoup4
+- Requests
 - SQLite3
 
 ## Contributing
