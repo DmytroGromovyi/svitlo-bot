@@ -14,6 +14,7 @@ from pathlib import Path
 from queue import Queue
 from threading import Thread
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -37,6 +38,7 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 MAX_USERS = 40
 MAX_GROUPS_PER_USER = 6
 DB_PATH = '/data/users.db'
+KYIV_TIMEZONE = ZoneInfo('Europe/Kyiv')
 
 # City configurations
 CITIES = {
@@ -467,6 +469,12 @@ async def check_and_notify():
             schedule = scraper.parse_schedule(json_content)
             if not schedule:
                 logger.warning(f"Failed to parse schedule for {city_id}")
+                if scraper.stale_source:
+                    db_execute('DELETE FROM schedules WHERE city = ?', (city_id,))
+                    logger.warning(
+                        f"Cleared cached schedules for {city_id} because the source date "
+                        f"({scraper.source_date}) is not current"
+                    )
                 continue
             
             groups_data = schedule.get('groups', {})
@@ -478,7 +486,7 @@ async def check_and_notify():
             
             changed_groups = []
             saved_count = 0
-            today_date = datetime.now().strftime('%Y-%m-%d')  # Reference date for this run
+            today_date = datetime.now(KYIV_TIMEZONE).strftime('%Y-%m-%d')  # Local schedule date
             for group, data in groups_data.items():
                 parsed_today, parsed_tomorrow = parse_schedule_entries(data)
                 if not parsed_today:

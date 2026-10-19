@@ -4,12 +4,18 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+KYIV_TIMEZONE = ZoneInfo("Europe/Kyiv")
+
+
+class StaleScheduleError(ValueError):
+    """Raised when the repository does not contain today's schedule."""
 
 DATA_REPOSITORY = "https://github.com/yaroslav2901/OE_OUTAGE_DATA"
 CITY_CONFIGS = {
@@ -32,6 +38,9 @@ class ScheduleScraper:
         self.city = city
         self.config = CITY_CONFIGS[city]
         self.storage_path = storage_path
+        self.stale_source = False
+        self.source_date = None
+        self.source_updated = None
         self.schedules = self._load_schedules()
 
     def _load_schedules(self):
@@ -76,9 +85,16 @@ class ScheduleScraper:
         if not json_content:
             return None
 
+        self.stale_source = False
+        self.source_date = None
+        self.source_updated = None
         try:
             data = json.loads(json_content)
             return self._parse_repository_json(data)
+        except StaleScheduleError as error:
+            self.stale_source = True
+            logger.warning("Ignoring stale %s schedule: %s", self.config["name"], error)
+            return None
         except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as error:
             logger.error("Error parsing %s schedule: %s", self.config["name"], error, exc_info=True)
             return None
@@ -95,20 +111,42 @@ class ScheduleScraper:
         preset = data.get("preset") or {}
         time_zone = preset.get("time_zone") or {}
         today_timestamp = fact.get("today")
+        self.source_updated = fact.get("update") or data.get("lastUpdated")
+        if today_timestamp is None:
+            raise ValueError("Missing fact.today schedule date")
+
+        today_key = str(today_timestamp)
+        if today_key not in fact_data:
+            raise ValueError("fact.today does not match any fact.data timestamp")
+
+        try:
+            source_date = datetime.fromtimestamp(int(today_timestamp), KYIV_TIMEZONE).date()
+        except (OverflowError, OSError) as error:
+            raise ValueError("Invalid fact.today timestamp") from error
+        self.source_date = source_date.isoformat()
+        current_date = datetime.now(KYIV_TIMEZONE).date()
+        if source_date != current_date:
+            raise StaleScheduleError(
+                f"source date is {source_date.isoformat()}, current date is {current_date.isoformat()}"
+            )
+
         timestamps = sorted(fact_data, key=lambda value: int(value))
-        if today_timestamp is not None:
-            today_key = str(today_timestamp)
-            if today_key not in fact_data:
-                raise ValueError("fact.today does not match any fact.data timestamp")
-            timestamps.remove(today_key)
-            timestamps.insert(0, today_key)
+        timestamps.remove(today_key)
+        timestamps.insert(0, today_key)
 
         schedule_data = {"timestamp": datetime.now().isoformat(), "groups": {}}
-        for day_index, timestamp in enumerate(timestamps):
+        for timestamp in timestamps:
             groups = fact_data[timestamp]
             if not isinstance(groups, dict):
                 raise ValueError(f"Invalid schedule data for timestamp {timestamp}")
-            date_label = f'Сьогодні ({fact.get("update", "")})' if day_index == 0 else "Завтра"
+            timestamp_date = datetime.fromtimestamp(int(timestamp), KYIV_TIMEZONE).date()
+            if timestamp_date == current_date:
+                date_label = f'Сьогодні ({fact.get("update", "")})'
+            elif timestamp_date == current_date + timedelta(days=1):
+                date_label = "Завтра"
+            else:
+                logger.info("Skipping schedule timestamp %s outside today/tomorrow", timestamp)
+                continue
 
             for group_key, hours in groups.items():
                 if not group_key.startswith("GPV") or not isinstance(hours, dict):
