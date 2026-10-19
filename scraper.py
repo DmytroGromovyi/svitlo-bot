@@ -18,6 +18,7 @@ class StaleScheduleError(ValueError):
     """Raised when the repository does not contain today's schedule."""
 
 DATA_REPOSITORY = "https://github.com/yaroslav2901/OE_OUTAGE_DATA"
+POWER_GROUPS = [f"{group}.{subgroup}" for group in range(1, 7) for subgroup in (1, 2)]
 CITY_CONFIGS = {
     "lviv": {
         "name": "Львівська область",
@@ -93,11 +94,28 @@ class ScheduleScraper:
             return self._parse_repository_json(data)
         except StaleScheduleError as error:
             self.stale_source = True
-            logger.warning("Ignoring stale %s schedule: %s", self.config["name"], error)
-            return None
+            logger.warning(
+                "Using no-outage default for stale %s schedule: %s",
+                self.config["name"], error,
+            )
+            return self._build_no_outage_schedule()
         except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as error:
             logger.error("Error parsing %s schedule: %s", self.config["name"], error, exc_info=True)
             return None
+
+    @staticmethod
+    def _build_no_outage_schedule():
+        """Create today's all-electricity schedule when the source is stale."""
+        return {
+            "timestamp": datetime.now(KYIV_TIMEZONE).isoformat(),
+            "groups": {
+                group: [{
+                    "date": "Сьогодні (джерело застаріле)",
+                    "schedule": "Відключень не заплановано",
+                }]
+                for group in POWER_GROUPS
+            },
+        }
 
     def _parse_repository_json(self, data):
         fact = data.get("fact")
@@ -125,9 +143,13 @@ class ScheduleScraper:
             raise ValueError("Invalid fact.today timestamp") from error
         self.source_date = source_date.isoformat()
         current_date = datetime.now(KYIV_TIMEZONE).date()
-        if source_date != current_date:
+        if source_date < current_date:
             raise StaleScheduleError(
                 f"source date is {source_date.isoformat()}, current date is {current_date.isoformat()}"
+            )
+        if source_date > current_date:
+            raise ValueError(
+                f"source date {source_date.isoformat()} is ahead of current date {current_date.isoformat()}"
             )
 
         timestamps = sorted(fact_data, key=lambda value: int(value))

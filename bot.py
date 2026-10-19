@@ -319,6 +319,9 @@ def format_schedule_display(schedule_text):
     if not schedule_text:
         return "ℹ️ Інформація відсутня"
 
+    if schedule_text == "Відключень не заплановано":
+        return "🟢 *Є світло:*\n  • 00:00 — 24:00\n\n🔴 *Немає світла:*\n  • відключень не заплановано"
+
     iv = extract_intervals(schedule_text)
     lines = ["🟢 *Є світло:*"]
     
@@ -400,7 +403,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
     if curr['off']:
         msg += f"\n⏱ *Загалом вимкнено:* {esc(fmt_hours(total/60))} годин\n"
     else:
-        msg += "  • немає даних\n"
+        msg += "  • відключень не заплановано\n"
     
     if curr_tomorrow:
         msg += "\n━━━━━━━━━━━━━━━━━━━━\n\n📅 *ЗАВТРА:*\n\n"
@@ -422,7 +425,7 @@ def format_notification(city, group, curr_today, curr_tomorrow, prev_today=None,
         if tm['off']:
             msg += f"\n⏱ *Загалом вимкнено:* {esc(fmt_hours(total_tm/60))} годин\n"
         else:
-            msg += "  • немає даних\n"
+            msg += "  • відключень не заплановано\n"
     
     msg += "\n_Графік може змінюватися протягом дня_"
     return msg
@@ -469,12 +472,6 @@ async def check_and_notify():
             schedule = scraper.parse_schedule(json_content)
             if not schedule:
                 logger.warning(f"Failed to parse schedule for {city_id}")
-                if scraper.stale_source:
-                    db_execute('DELETE FROM schedules WHERE city = ?', (city_id,))
-                    logger.warning(
-                        f"Cleared cached schedules for {city_id} because the source date "
-                        f"({scraper.source_date}) is not current"
-                    )
                 continue
             
             groups_data = schedule.get('groups', {})
@@ -604,7 +601,8 @@ async def show_schedule(update, context):
         schedule = get_schedule(city, group)
         if not schedule:
             await update.message.reply_text(
-                f"ℹ️ Завантаження графіку для {city_name}, група {group}...", 
+                f"ℹ️ Актуальний графік для {city_name}, група {group}, поки недоступний. "
+                "Джерело ще не опублікувало графік на сьогодні; перевірка оновиться автоматично.",
                 reply_markup=REPLY_KEYBOARD
             )
             continue
