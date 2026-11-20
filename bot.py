@@ -7,10 +7,10 @@ Svitlo Bot - Multi-City Power Outage Notification Bot
 import os
 import logging
 import sqlite3
+import json
 import re
 import hashlib
-from io import BytesIO
-from html import escape as html_escape
+import requests
 from pathlib import Path
 from queue import Queue
 from threading import Thread
@@ -19,14 +19,13 @@ from zoneinfo import ZoneInfo
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.error import BadRequest, NetworkError
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from flask import Flask, request, jsonify
 
 import sys
 sys.path.append(os.path.dirname(__file__))
 from scraper import ScheduleScraper
-from schedule_card import render_schedule_png
 
 # =============================================================================
 # CONFIG
@@ -36,11 +35,10 @@ BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 API_SECRET = os.getenv('API_SECRET')
 PORT = int(os.getenv('PORT', 8080))
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-LOCAL_MODE = os.getenv('LOCAL_MODE', '').lower() in ('1', 'true', 'yes')
 
 MAX_USERS = 40
 MAX_GROUPS_PER_USER = 6
-DB_PATH = os.getenv('DB_PATH', '/data/users.db')
+DB_PATH = '/data/users.db'
 KYIV_TIMEZONE = ZoneInfo('Europe/Kyiv')
 
 # City configurations
@@ -96,15 +94,6 @@ def get_city_keyboard():
             callback_data=f"city_{city_id}"
         )])
     return InlineKeyboardMarkup(buttons)
-
-def get_group_keyboard(city, current_groups=None):
-    current_groups = current_groups or []
-    available = [group for group in CITIES[city]['groups'] if group not in current_groups]
-    buttons = [
-        [InlineKeyboardButton(group, callback_data=f"add_{group}") for group in available[i:i + 3]]
-        for i in range(0, len(available), 3)
-    ]
-    return InlineKeyboardMarkup(buttons) if buttons else None
 
 # =============================================================================
 # DATABASE
@@ -347,115 +336,137 @@ def format_timeline(schedule_text):
         blocks.append("🟥" if is_off else "🟩")
     return "".join(blocks) + "\n🟩 є світло · 🟥 вимкнення · 00—24"
 
-def schedule_caption(city, group, today_text, tomorrow_text=None, updated_at=None,
-                    notify=False, test=False, test_label=None):
-    """Lead with exact planned outage windows, not the current power state."""
-    def ranges_block(schedule_text):
-        intervals = extract_intervals(schedule_text)["off"]
-        if intervals:
-            return "\n".join(f"• <b>{fmt_time(start)} — {fmt_time(end)}</b>" for start, end in intervals)
-        if schedule_text == "Відключень не заплановано":
-            return "🟢 Відключень за графіком немає"
-        return "⚪️ Графік ще не опублікований"
+def build_schedule_widget(city, group, today_text, tomorrow_text=None, updated_at=None):
+    """Return the self-contained HTML widget and a plain-text compatibility caption."""
+    def day_data(schedule_text):
+        intervals = extract_intervals(schedule_text)
+        return {
+            "off": intervals["off"],
+            "on": intervals["on"],
+            "no_outages": schedule_text == "Відключень не заплановано",
+        }
 
-    city_name = html_escape(CITIES.get(city, {}).get("name", city))
-    group_label = html_escape(str(group))
-    if test:
-        label = f" · {html_escape(test_label)}" if test_label else ""
-        heading = f"🧪 <b>ТЕСТОВЕ СПОВІЩЕННЯ{label}</b>\n⚡️ <b>Імітація оновлення графіка</b>"
-    elif notify:
-        heading = "⚡️ <b>ГРАФІК ОНОВИВСЯ</b>"
-    else:
-        heading = "⚡️ <b>ГРАФІК ВІДКЛЮЧЕНЬ</b>"
-    caption = (
-        f"{heading}\n"
-        f"📍 <b>{city_name}</b> · група <b>{group_label}</b>\n"
-        f"\n🔴 <b>КОЛИ НЕ БУДЕ СВІТЛА · СЬОГОДНІ</b>\n"
-        f"{ranges_block(today_text)}"
-    )
-    caption += f"\n\n🗓 <b>ЗАВТРА</b>\n{ranges_block(tomorrow_text)}"
+    city_name = CITIES.get(city, {}).get("name", city)
     if updated_at:
-        caption += f"\n🕒 <i>Оновлено о {html_escape(updated_at)}</i>"
-    return caption
+        try:
+            updated_time = datetime.fromisoformat(updated_at)
+            if updated_time.tzinfo is None:
+                updated_time = updated_time.replace(tzinfo=ZoneInfo("UTC"))
+            updated_at = updated_time.astimezone(KYIV_TIMEZONE).strftime("%H:%M")
+        except (TypeError, ValueError):
+            updated_at = str(updated_at)[-8:-3]
+    else:
+        updated_at = datetime.now(KYIV_TIMEZONE).strftime("%H:%M")
+    payload = json.dumps({
+        "city": city_name,
+        "group": group,
+        "today": day_data(today_text),
+        "tomorrow": day_data(tomorrow_text) if tomorrow_text else None,
+        "updated": updated_at or datetime.now(KYIV_TIMEZONE).strftime("%H:%M"),
+    }, ensure_ascii=False, separators=(",", ":"))
+    tomorrow_section = """
+      <section class="tomorrow">
+        <div class="section-title">ЗАВТРА</div>
+        <div class="tomorrow-list" id="tomorrow-list"></div>
+      </section>
+    """ if tomorrow_text else ""
 
+    widget_html = f'''<!doctype html><html><head><meta charset="utf-8"><style>
+*{{box-sizing:border-box}}body{{margin:0;padding:14px;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--tg-theme-text-color,#20312d);background:transparent}}
+.widget{{padding:15px;border-radius:18px;background:var(--tg-theme-secondary-bg-color,#f1f5f3)}}
+.head{{display:flex;align-items:center;gap:10px}}.bolt{{width:36px;height:36px;display:grid;place-items:center;border-radius:12px;background:rgba(35,164,102,.12);color:var(--tg-theme-button-color,#16845a);font-size:21px}}
+.place{{font-weight:650;font-size:14px}}.group{{color:var(--tg-theme-hint-color,#75817c);font-size:12px;margin-top:3px}}
+.live{{margin:16px 0 7px;font-weight:700;font-size:11px;letter-spacing:.07em;color:#158455}}.live.off{{color:#c84d42}}.headline{{font-size:22px;font-weight:700;line-height:1.18;letter-spacing:-.025em}}
+.countdown{{font-size:13px;color:var(--tg-theme-hint-color,#75817c);margin-top:5px}}
+.next{{margin-top:13px;padding:12px 13px;border-radius:14px;background:rgba(230,93,81,.12);display:flex;justify-content:space-between;align-items:center;gap:9px}}
+.next-label{{font-size:10px;font-weight:700;letter-spacing:.08em;color:#bc4a40}}.next-range{{font-size:17px;font-weight:700;color:#a63d34;white-space:nowrap}}.next-duration{{font-size:11px;color:var(--tg-theme-hint-color,#75817c);margin-top:3px}}
+.section{{display:flex;justify-content:space-between;align-items:center;margin:17px 0 9px}}.section-title{{font-size:11px;font-weight:700;letter-spacing:.08em}}.updated{{font-size:10px;color:var(--tg-theme-hint-color,#75817c)}}
+.track{{height:14px;position:relative;margin:25px 8px 9px 0;border-radius:20px;background:#23a466;clip-path:polygon(0 0,97% 0,100% 50%,97% 100%,0 100%)}}
+.outage{{position:absolute;top:0;bottom:0;border-radius:4px;background:#e65d51}}.now{{position:absolute;z-index:1;top:-7px;width:2px;height:28px;background:var(--tg-theme-text-color,#20312d)}}.now:before{{content:"ЗАРАЗ";position:absolute;bottom:30px;left:50%;transform:translateX(-50%);font-size:9px;font-weight:700;white-space:nowrap;color:var(--tg-theme-hint-color,#75817c)}}
+.axis{{display:flex;justify-content:space-between;color:var(--tg-theme-hint-color,#75817c);font-size:10px}}
+.legend{{display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--tg-theme-hint-color,#75817c)}}.key{{display:inline-block;width:8px;height:8px;border-radius:3px;margin-right:5px;background:#23a466}}.key.red{{background:#e65d51}}
+.ranges{{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}}.range{{padding:7px 9px;border-radius:9px;background:rgba(230,93,81,.12);color:#b5453c;font-size:11px;font-weight:650;white-space:nowrap}}
+.tomorrow{{border-top:1px solid var(--tg-theme-section-separator-color,#dce4e0);margin-top:15px;padding-top:12px}}.tomorrow-list{{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}}.tomorrow-list .clear{{font-size:12px;color:#158455}}
+</style></head><body><main class="widget" aria-label="Графік відключень">
+  <header class="head"><div class="bolt" aria-hidden="true">ϟ</div><div><div class="place" id="place"></div><div class="group" id="group"></div></div></header>
+  <div class="live" id="live"></div><div class="headline" id="headline" aria-live="polite"></div><div class="countdown" id="countdown"></div>
+  <div class="next" id="next"><div><div class="next-label" id="next-label"></div><div class="next-duration" id="next-duration"></div></div><div class="next-range" id="next-range"></div></div>
+  <div class="section"><div class="section-title">СЬОГОДНІ</div><div class="updated" id="updated"></div></div>
+  <div class="track" id="track" role="img" aria-label="Зелена стрілка — періоди зі світлом, червоні блоки — відключення"></div>
+  <div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+  <div class="legend"><span><i class="key"></i>Є світло</span><span><i class="key red"></i>Вимкнення</span></div>
+  <div class="ranges" id="today-ranges"></div>
+  {tomorrow_section}
+</main><script>
+const d={payload};
+function nowMinute(){{try{{const p=new Intl.DateTimeFormat('en-GB',{{timeZone:'Europe/Kyiv',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}}).formatToParts(new Date());return Number(p.find(x=>x.type==='hour').value)*60+Number(p.find(x=>x.type==='minute').value)}}catch(e){{const n=new Date();return n.getHours()*60+n.getMinutes()}}}}
+function time(n){{return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0')}}
+function duration(n){{const h=Math.floor(n/60),m=n%60;return h?h+' год'+(m?' '+m+' хв':''):m+' хв'}}
+function isOff(minute){{return !d.today.no_outages&&d.today.off.some(x=>x[0]<=minute&&minute<x[1])}}
+function addRanges(root,intervals,emptyText){{while(root.firstChild)root.removeChild(root.firstChild);if(!intervals.length){{const s=document.createElement('span');s.className='clear';s.textContent=emptyText;root.appendChild(s);return}}for(const x of intervals){{const s=document.createElement('span');s.className='range';s.textContent=time(x[0])+'—'+time(x[1]);root.appendChild(s)}}}}
+function render(){{const m=nowMinute(),off=isOff(m),wholeDay=d.today.no_outages;const live=document.getElementById('live');live.className='live'+(off?' off':'');live.textContent=off?'● СВІТЛА ЗАРАЗ НЕМАЄ':wholeDay?'● ВІДКЛЮЧЕНЬ НЕ ЗАПЛАНОВАНО':'● СВІТЛО Є ЗАРАЗ';document.getElementById('place').textContent=d.city;document.getElementById('group').textContent='Група '+d.group;document.getElementById('updated').textContent='оновлено '+d.updated;
+let active=(off?d.today.off:d.today.on).find(x=>x[0]<=m&&m<x[1]);let nextOff=d.today.off.find(x=>x[0]>m);const headline=document.getElementById('headline'),countdown=document.getElementById('countdown'),box=document.getElementById('next');if(wholeDay){{headline.textContent='Світло буде весь день';countdown.textContent='';box.hidden=true}}else if(active){{headline.textContent=off?'Світла не буде ще':'Світло буде ще';countdown.textContent=duration(Math.max(0,active[1]-m));box.hidden=false;if(off){{document.getElementById('next-label').textContent='ВІДНОВЛЕННЯ СВІТЛА';document.getElementById('next-range').textContent=time(active[1]);document.getElementById('next-duration').textContent='за графіком'}}else if(nextOff){{document.getElementById('next-label').textContent='НАСТУПНЕ ВИМКНЕННЯ';document.getElementById('next-range').textContent=time(nextOff[0])+' — '+time(nextOff[1]);document.getElementById('next-duration').textContent='тривалість · '+duration(nextOff[1]-nextOff[0])}}else{{document.getElementById('next-label').textContent='ДАЛІ ЗА ГРАФІКОМ';document.getElementById('next-range').textContent='відключень немає';document.getElementById('next-duration').textContent='до кінця доби'}}}}else{{headline.textContent='Графік на сьогодні завершився';countdown.textContent='';box.hidden=true}}
+const track=document.getElementById('track');while(track.firstChild)track.removeChild(track.firstChild);for(const x of d.today.off){{const bar=document.createElement('i');bar.className='outage';bar.style.left=(x[0]/1440*100)+'%';bar.style.width=((x[1]-x[0])/1440*100)+'%';track.appendChild(bar)}}const marker=document.createElement('i');marker.className='now';marker.style.left=(m/1440*100)+'%';track.appendChild(marker);addRanges(document.getElementById('today-ranges'),d.today.off,'Відключень не заплановано');
+if(d.tomorrow){{const list=document.getElementById('tomorrow-list');addRanges(list,d.tomorrow.off,d.tomorrow.no_outages?'Відключень не заплановано':'Графік ще не опублікований')}}}}
+render();setInterval(render,30000);
+</script></body></html>'''
 
-async def send_schedule_card(bot, chat_id, city, group, today_text, tomorrow_text=None,
-                             updated_at=None, notify=False, test=False, test_label=None):
-    """Render the SVG schedule card to PNG and send it with a readable caption."""
-    city_name = CITIES.get(city, {}).get('name', city)
-    caption = schedule_caption(city, group, today_text, tomorrow_text, notify=notify,
-                               test=test, test_label=test_label)
+    caption = schedule_widget_caption(city, group, today_text, tomorrow_text)
+    return widget_html, caption
+
+def schedule_widget_caption(city, group, today_text, tomorrow_text=None):
+    """Plain text shown if a Telegram client cannot render an HTML widget."""
+    state, next_change = schedule_status(today_text)
+    if state == "on":
+        status = "Зараз за графіком є світло"
+    elif state == "off":
+        status = "Зараз за графіком світла немає"
+    else:
+        status = "Стан за графіком не визначений"
+    intervals = extract_intervals(today_text)["off"]
+    today = ", ".join(f"{fmt_time(a)}–{fmt_time(b)}" for a, b in intervals) or "відключень не заплановано"
+    city_name = CITIES.get(city, {}).get("name", city)
+    caption = f"⚡ Графік · {city_name} · група {group}\n{status}\nСьогодні: {today}"
+    if next_change is not None and next_change < 1440:
+        caption += f"\nНаступна зміна: {fmt_time(next_change)}"
+    if tomorrow_text:
+        tomorrow = extract_intervals(tomorrow_text)["off"]
+        ranges = ", ".join(f"{fmt_time(a)}–{fmt_time(b)}" for a, b in tomorrow) or "відключень не заплановано"
+        caption += f"\nЗавтра: {ranges}"
+    return caption[:1024]
+
+async def send_schedule_widget(bot, chat_id, city, group, today_text, tomorrow_text=None,
+                               updated_at=None, notify=False):
+    """Send an actual Telegram widget and a readable message if Bot API rejects it."""
+    widget_html, caption = build_schedule_widget(city, group, today_text, tomorrow_text, updated_at)
+    if notify:
+        caption = "⚡️ Графік оновився\n" + caption
+    payload = {
+        "chat_id": chat_id,
+        "html": widget_html,
+        "caption": caption,
+        "disable_notification": not notify,
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "📋 Оновити графік", "callback_data": "schedule"}
+        ]]},
+    }
     try:
-        now = datetime.now(KYIV_TIMEZONE)
-        updated_label = None
-        if updated_at:
-            try:
-                parsed_update = datetime.fromisoformat(updated_at)
-                if parsed_update.tzinfo is None:
-                    parsed_update = parsed_update.replace(tzinfo=ZoneInfo("UTC"))
-                updated_label = parsed_update.astimezone(KYIV_TIMEZONE).strftime("%H:%M")
-            except (TypeError, ValueError):
-                updated_label = str(updated_at)[-8:-3]
-        updated_label = updated_label or now.strftime("%H:%M")
-        caption = schedule_caption(
-            city, group, today_text, tomorrow_text, updated_label,
-            notify=notify, test=test, test_label=test_label,
+        response = await asyncio.to_thread(
+            requests.post,
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendWidget",
+            json=payload,
+            timeout=15,
         )
-        png = render_schedule_png(
-            city_name,
-            group,
-            today_text,
-            tomorrow_text,
-            updated_label,
-            now.hour * 60 + now.minute,
-        )
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=BytesIO(png),
-            caption=caption,
-            parse_mode="HTML",
-            show_caption_above_media=True,
-            disable_notification=not notify,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Оновити графік", callback_data="schedule")
-            ]]),
-        )
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram rejected the widget"))
     except Exception as error:
-        logger.warning("Schedule card send failed for chat %s; sending a text fallback: %s", chat_id, error)
-        await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
+        logger.warning("Widget send failed for chat %s; sending a text fallback: %s", chat_id, error)
+        await bot.send_message(chat_id=chat_id, text=caption, reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("📋 Оновити графік", callback_data="schedule")
         ]]))
 
-
-async def test_update_notification(update, context):
-    """Send two local-only sample updates without changing the database."""
-    if not LOCAL_MODE:
-        await update.message.reply_text("Ця команда доступна лише в локальному режимі.")
-        return
-
-    chat_id = update.effective_chat.id
-    city = get_user_city(chat_id) or "lviv"
-    groups = get_user_groups(chat_id, city)
-    group = groups[0] if groups else "1.1"
-    now = datetime.now(KYIV_TIMEZONE)
-    samples = [
-        (
-            "є графік на завтра",
-            "Відключення за графіком: з 04:00 до 07:30, з 14:30 до 18:00, з 21:30 до 24:00",
-            "Відключення за графіком: з 05:00 до 08:00, з 15:00 до 18:30",
-        ),
-        (
-            "відключень немає",
-            "Відключень не заплановано",
-            "Відключень не заплановано",
-        ),
-    ]
-    for label, today_text, tomorrow_text in samples:
-        await send_schedule_card(
-            context.bot, chat_id, city, group, today_text, tomorrow_text,
-            updated_at=now.isoformat(), notify=True, test=True, test_label=label,
-        )
-        await asyncio.sleep(0.5)
 def esc(text):
     for c in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
         text = text.replace(c, f'\\{c}')
@@ -699,14 +710,13 @@ async def check_and_notify():
                             (city_id, group), fetch_one=True
                         )
                         if result:
-                            await send_schedule_card(
+                            await send_schedule_widget(
                                 bot_app.bot,
                                 user['chat_id'],
                                 city_id,
                                 group,
                                 result[0],
                                 result[1],
-                                updated_at=result[4],
                                 notify=True,
                             )
                             await asyncio.sleep(0.5)
@@ -759,7 +769,7 @@ async def start(update, context):
         )
         schedule = get_schedule(city, groups[0])
         if schedule and schedule['today']:
-            await send_schedule_card(
+            await send_schedule_widget(
                 context.bot, chat_id, city, groups[0],
                 schedule['today'], schedule['tomorrow'], schedule['updated_at']
             )
@@ -797,7 +807,7 @@ async def show_schedule(update, context):
             )
             continue
         
-        await send_schedule_card(
+        await send_schedule_widget(
             context.bot,
             chat_id,
             city,
@@ -921,16 +931,16 @@ async def handle_callback(update, context):
             )
             schedule = get_schedule(city_id, groups[0])
             if schedule and schedule['today']:
-                await send_schedule_card(
+                await send_schedule_widget(
                     context.bot, chat_id, city_id, groups[0],
                     schedule['today'], schedule['tomorrow'], schedule['updated_at']
                 )
         else:
             await safe_edit(
                 query,
-                f"✅ Область обрано: {city_emoji} *{city_name}*\n\nОберіть свою групу:",
+                f"✅ Область обрано: {city_emoji} *{city_name}*\n\nТепер додайте групу:",
                 parse_mode='Markdown',
-                reply_markup=get_group_keyboard(city_id)
+                reply_markup=get_inline_keyboard(False)
             )
         return
     
@@ -953,7 +963,7 @@ async def handle_callback(update, context):
                     f"✅ Групу {group} додано. Підписок: {len(groups)}/{MAX_GROUPS_PER_USER}.",
                     reply_markup=get_inline_keyboard(True)
                 )
-                await send_schedule_card(
+                await send_schedule_widget(
                     context.bot, chat_id, city, group,
                     schedule['today'], schedule['tomorrow'], schedule['updated_at']
                 )
@@ -997,7 +1007,7 @@ async def handle_callback(update, context):
         for group in groups:
             schedule = get_schedule(city, group)
             if schedule:
-                await send_schedule_card(
+                await send_schedule_widget(
                     context.bot, chat_id, city, group,
                     schedule['today'] or '', schedule['tomorrow'], schedule['updated_at']
                 )
@@ -1036,14 +1046,12 @@ async def handle_callback(update, context):
             )
             return
         
-        keyboard = get_group_keyboard(city, current_groups)
-        if not keyboard:
-            await safe_edit(query, "✅ Ви вже підписані на всі доступні групи.",
-                            reply_markup=get_inline_keyboard(True))
-            return
+        available = [g for g in CITIES[city]['groups'] if g not in current_groups]
+        kb = [[InlineKeyboardButton(g, callback_data=f"add_{g}") for g in available[i:i+3]] 
+              for i in range(0, len(available), 3)]
         
         city_name = CITIES[city]['name']
-        await safe_edit(query, f"Оберіть групу для додавання ({city_name}):", reply_markup=keyboard)
+        await safe_edit(query, f"Оберіть групу для додавання ({city_name}):", reply_markup=InlineKeyboardMarkup(kb))
     
     elif data == "removegroup":
         city = get_user_city(chat_id)
@@ -1189,33 +1197,13 @@ async def setup():
     bot_app.add_handler(CommandHandler('removegroup', remove_group))
     bot_app.add_handler(CommandHandler('cities', show_cities))
     bot_app.add_handler(CommandHandler('stop', stop))
-    if LOCAL_MODE:
-        bot_app.add_handler(CommandHandler('testupdate', test_update_notification))
     
     bot_app.add_handler(CallbackQueryHandler(handle_callback))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    startup_attempt = 0
-    while True:
-        try:
-            await bot_app.initialize()
-            break
-        except NetworkError as error:
-            startup_attempt += 1
-            retry_delay = min(60, 2 ** min(startup_attempt, 6))
-            logger.warning(
-                "Telegram API unavailable during startup (%s); retrying in %s seconds",
-                error,
-                retry_delay,
-            )
-            await asyncio.sleep(retry_delay)
+    await bot_app.initialize()
     await bot_app.start()
-    if LOCAL_MODE:
-        await bot_app.updater.start_polling()
-    else:
-        if not WEBHOOK_URL:
-            raise RuntimeError('WEBHOOK_URL must be set unless LOCAL_MODE=1')
-        await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
 
 def run_bot():
     global bot_loop
@@ -1223,8 +1211,7 @@ def run_bot():
     bot_loop = loop
     asyncio.set_event_loop(loop)
     loop.run_until_complete(setup())
-    if not LOCAL_MODE:
-        loop.create_task(process_updates())
+    loop.create_task(process_updates())
     loop.create_task(checker_loop())
     loop.run_forever()
 
