@@ -43,5 +43,5 @@ export LOCAL_MODE=1
 export DB_PATH="${DB_PATH:-$(pwd)/data/users.db}"
 
 "$VENV_PYTHON" -m pip install -q -r requirements.txt
-echo "Starting local bot and Flask server on http://127.0.0.1:${PORT:-8080}"
+echo "Starting local bot and web server on http://127.0.0.1:${PORT:-8080}"
 exec "$VENV_PYTHON" bot.py

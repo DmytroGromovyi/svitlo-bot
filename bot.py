@@ -9,19 +9,23 @@ import logging
 import sqlite3
 import re
 import hashlib
+import hmac
+import time
 from io import BytesIO
 from html import escape as html_escape
 from pathlib import Path
-from queue import Queue
-from threading import Thread
+from queue import Empty, Full, Queue
+from threading import Lock, Thread
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from flask import Flask, request, jsonify
+from waitress import serve
 
 import sys
 sys.path.append(os.path.dirname(__file__))
@@ -34,6 +38,7 @@ from schedule_card import render_schedule_png
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 API_SECRET = os.getenv('API_SECRET')
+WEBHOOK_SECRET = os.getenv('TELEGRAM_WEBHOOK_SECRET')
 PORT = int(os.getenv('PORT', 8080))
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 LOCAL_MODE = os.getenv('LOCAL_MODE', '').lower() in ('1', 'true', 'yes')
@@ -41,6 +46,9 @@ LOCAL_MODE = os.getenv('LOCAL_MODE', '').lower() in ('1', 'true', 'yes')
 MAX_USERS = 40
 MAX_GROUPS_PER_USER = 6
 DB_PATH = os.getenv('DB_PATH', '/data/users.db')
+MAX_WEBHOOK_QUEUE = 256
+MAX_BROADCAST_LENGTH = 4096
+MIN_BROADCAST_INTERVAL_SECONDS = 10
 KYIV_TIMEZONE = ZoneInfo('Europe/Kyiv')
 
 # City configurations
@@ -62,7 +70,60 @@ logger = logging.getLogger(__name__)
 
 bot_app = None
 bot_loop = None
-update_queue = Queue()
+update_queue = Queue(maxsize=MAX_WEBHOOK_QUEUE)
+broadcast_lock = Lock()
+last_broadcast_at = None
+
+
+def redact_secrets(value):
+    message = str(value)
+    for secret in (BOT_TOKEN, API_SECRET, WEBHOOK_SECRET):
+        if secret:
+            message = message.replace(secret, '[REDACTED]')
+    return message
+
+
+def validate_config():
+    if not BOT_TOKEN:
+        raise RuntimeError('TELEGRAM_BOT_TOKEN must be configured')
+    if LOCAL_MODE:
+        return
+
+    if not WEBHOOK_URL:
+        raise RuntimeError('WEBHOOK_URL must be configured unless LOCAL_MODE=1')
+    parsed_webhook_url = urlsplit(WEBHOOK_URL)
+    if (parsed_webhook_url.scheme != 'https' or not parsed_webhook_url.netloc
+            or parsed_webhook_url.username or parsed_webhook_url.password):
+        raise RuntimeError('WEBHOOK_URL must be an https URL')
+    if not WEBHOOK_SECRET or not re.fullmatch(r'[A-Za-z0-9_-]{32,256}', WEBHOOK_SECRET):
+        raise RuntimeError('TELEGRAM_WEBHOOK_SECRET must be 32-256 letters, numbers, underscores, or hyphens')
+    if WEBHOOK_SECRET == BOT_TOKEN or (API_SECRET and WEBHOOK_SECRET == API_SECRET):
+        raise RuntimeError('Telegram webhook secret must be unique and separate from other secrets')
+
+
+def api_auth_error():
+    if not API_SECRET or len(API_SECRET) < 32:
+        return jsonify({'error': 'API authentication is not securely configured'}), 503
+
+    authorization = request.headers.get('Authorization', '')
+    scheme, separator, credential = authorization.partition(' ')
+    if (not separator or scheme.lower() != 'bearer' or not credential
+            or credential != credential.strip() or any(char.isspace() for char in credential)):
+        return jsonify({'error': 'Unauthorized'}), 401
+    if not hmac.compare_digest(credential.encode('utf-8'), API_SECRET.encode('utf-8')):
+        return jsonify({'error': 'Unauthorized'}), 401
+    return None
+
+
+def broadcast_is_rate_limited():
+    global last_broadcast_at
+    now = time.monotonic()
+    with broadcast_lock:
+        if (last_broadcast_at is not None
+                and now - last_broadcast_at < MIN_BROADCAST_INTERVAL_SECONDS):
+            return True
+        last_broadcast_at = now
+        return False
 
 # =============================================================================
 # KEYBOARDS
@@ -199,7 +260,7 @@ def add_user_group(chat_id, city, group):
                   (chat_id, city, group))
         return True, None
     except Exception as e:
-        logger.error(f"Error adding group: {e}")
+        logger.error("Error adding group: %s", redact_secrets(e))
         return False, "Помилка при додаванні групи"
 
 def remove_user_group(chat_id, city, group):
@@ -416,15 +477,10 @@ async def send_schedule_card(bot, chat_id, city, group, today_text, tomorrow_tex
             parse_mode="HTML",
             show_caption_above_media=True,
             disable_notification=not notify,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Оновити графік", callback_data="schedule")
-            ]]),
         )
     except Exception as error:
-        logger.warning("Schedule card send failed for chat %s; sending a text fallback: %s", chat_id, error)
-        await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Оновити графік", callback_data="schedule")
-        ]]))
+        logger.warning("Schedule card send failed for chat %s; sending a text fallback: %s", chat_id, redact_secrets(error))
+        await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML")
 
 
 async def test_update_notification(update, context):
@@ -625,7 +681,7 @@ async def broadcast_message(message, parse_mode=None):
             success_count += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Broadcast failed for user {chat_id}: {e}")
+            logger.error("Broadcast failed for user %s: %s", chat_id, redact_secrets(e))
             failed_count += 1
     
     logger.info(f"Broadcast complete: {success_count} sent, {failed_count} failed")
@@ -711,10 +767,10 @@ async def check_and_notify():
                             )
                             await asyncio.sleep(0.5)
                     except Exception as e:
-                        logger.error(f"Notify error {user['chat_id']}: {e}")
+                        logger.error("Notify error for chat %s: %s", user['chat_id'], redact_secrets(e))
                         
     except Exception as e:
-        logger.error(f"Checker error: {e}", exc_info=True)
+        logger.error("Checker error: %s", redact_secrets(e))
 
 async def checker_loop():
     logger.info("Fetching initial schedules...")
@@ -1097,51 +1153,62 @@ async def stop(update, context):
 # =============================================================================
 
 flask_app = Flask(__name__)
+flask_app.config['MAX_CONTENT_LENGTH'] = 64 * 1024
 
 @flask_app.route('/health')
 def health():
-    count = db_execute('SELECT COUNT(*) FROM users', fetch_one=True)[0]
-    total_groups = db_execute('SELECT COUNT(*) FROM user_groups', fetch_one=True)[0]
-    
-    city_stats = {}
-    for city_id in CITIES.keys():
-        city_users = db_execute(
-            'SELECT COUNT(DISTINCT chat_id) FROM user_groups WHERE city = ?', 
-            (city_id,), fetch_one=True
-        )[0]
-        city_stats[city_id] = city_users
-    
-    return jsonify({
-        'status': 'healthy', 
-        'users': count, 
-        'total_subscriptions': total_groups,
-        'by_city': city_stats
-    })
+    return jsonify({'status': 'healthy'})
+
+
+@flask_app.after_request
+def add_security_headers(response):
+    response.headers.setdefault('Cache-Control', 'no-store')
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    return response
 
 @flask_app.route('/api/users')
 def api_users():
-    auth = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if auth != API_SECRET:
-        return jsonify({'error': 'Unauthorized'}), 401
+    auth_error = api_auth_error()
+    if auth_error:
+        return auth_error
     users = get_all_users()
     return jsonify({'users': users, 'count': len(users)})
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    update_queue.put(request.get_json(force=True))
+    if LOCAL_MODE:
+        return jsonify({'error': 'Webhook is disabled in local polling mode'}), 404
+    if not WEBHOOK_SECRET:
+        return jsonify({'error': 'Webhook authentication is not configured'}), 503
+    supplied_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+    if not hmac.compare_digest(supplied_secret.encode('utf-8'), WEBHOOK_SECRET.encode('utf-8')):
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True)
+    event_keys = [key for key in ('message', 'callback_query') if key in data] if isinstance(data, dict) else []
+    if (not isinstance(data, dict) or not isinstance(data.get('update_id'), int)
+            or isinstance(data.get('update_id'), bool) or len(event_keys) != 1
+            or not isinstance(data[event_keys[0]], dict)):
+        return jsonify({'error': 'Invalid Telegram update'}), 400
+    try:
+        update_queue.put_nowait(data)
+    except Full:
+        return jsonify({'error': 'Update queue is full'}), 503
     return 'OK'
 
 @flask_app.route('/api/broadcast', methods=['POST'])
 def api_broadcast():
-    auth = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if auth != API_SECRET:
-        return jsonify({'error': 'Unauthorized'}), 401
+    auth_error = api_auth_error()
+    if auth_error:
+        return auth_error
     
-    data = request.get_json()
-    if not data or 'message' not in data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'message' not in data:
         return jsonify({'error': 'Missing message field'}), 400
     
     message = data['message']
+    if not isinstance(message, str) or not message or len(message) > MAX_BROADCAST_LENGTH:
+        return jsonify({'error': f'Message must contain 1-{MAX_BROADCAST_LENGTH} characters'}), 400
     parse_mode = data.get('parse_mode', 'Markdown')
     
     if parse_mode not in ['Markdown', 'MarkdownV2', 'HTML', None]:
@@ -1149,6 +1216,9 @@ def api_broadcast():
     
     if bot_loop is None:
         return jsonify({'error': 'Bot not ready'}), 503
+
+    if broadcast_is_rate_limited():
+        return jsonify({'error': 'Broadcast rate limit exceeded'}), 429
     
     asyncio.run_coroutine_threadsafe(
         broadcast_message(message, parse_mode),
@@ -1169,14 +1239,18 @@ def api_broadcast():
 
 async def process_updates():
     while True:
-        if not update_queue.empty():
-            try:
-                data = update_queue.get()
-                update = Update.de_json(data, bot_app.bot)
-                await bot_app.process_update(update)
-            except Exception as e:
-                logger.error(f"Update error: {e}")
-        await asyncio.sleep(0.1)
+        try:
+            data = update_queue.get_nowait()
+        except Empty:
+            await asyncio.sleep(0.1)
+            continue
+        try:
+            update = Update.de_json(data, bot_app.bot)
+            await bot_app.process_update(update)
+        except Exception as e:
+            logger.error("Update error: %s", redact_secrets(e))
+        finally:
+            update_queue.task_done()
 
 async def setup():
     global bot_app
@@ -1205,7 +1279,7 @@ async def setup():
             retry_delay = min(60, 2 ** min(startup_attempt, 6))
             logger.warning(
                 "Telegram API unavailable during startup (%s); retrying in %s seconds",
-                error,
+                redact_secrets(error),
                 retry_delay,
             )
             await asyncio.sleep(retry_delay)
@@ -1215,7 +1289,11 @@ async def setup():
     else:
         if not WEBHOOK_URL:
             raise RuntimeError('WEBHOOK_URL must be set unless LOCAL_MODE=1')
-        await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        await bot_app.bot.set_webhook(
+            url=f"{WEBHOOK_URL.rstrip('/')}/webhook",
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=['message', 'callback_query'],
+        )
 
 def run_bot():
     global bot_loop
@@ -1229,6 +1307,8 @@ def run_bot():
     loop.run_forever()
 
 if __name__ == '__main__':
+    validate_config()
     init_db()
     Thread(target=run_bot, daemon=True).start()
-    flask_app.run(host='0.0.0.0', port=PORT)
+    host = '127.0.0.1' if LOCAL_MODE else '0.0.0.0'
+    serve(flask_app, host=host, port=PORT, threads=8)

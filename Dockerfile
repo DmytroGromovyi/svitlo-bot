@@ -16,8 +16,11 @@ COPY bot.py .
 COPY scraper.py .
 COPY schedule_card.py .
 
-# Create data directory
-RUN mkdir -p data
+# Create writable data paths and drop root privileges for runtime.
+RUN mkdir -p data /data && chown -R 10001:10001 /app /data
+
+# Fly.io assigns the mounted volume to the image's configured user.
+USER 10001:10001
 
 # Run bot
 CMD ["python", "bot.py"]

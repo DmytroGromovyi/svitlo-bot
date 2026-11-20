@@ -27,10 +27,14 @@ Svitlo Bot fetches pre-structured outage schedule JSON from the [OE_OUTAGE_DATA 
 
 ```bash
 TELEGRAM_BOT_TOKEN=your_bot_token_here
-API_SECRET=your_secret_for_api_auth
+API_SECRET=long_random_secret_for_admin_api
+TELEGRAM_WEBHOOK_SECRET=long_random_secret_for_telegram_webhook
 WEBHOOK_URL=https://your-domain.com
 PORT=8080
 ```
+
+Generate each secret separately with `python -c "import secrets; print(secrets.token_urlsafe(32))"` and configure them as deployment secrets. Keep them different. The webhook secret must contain only letters, numbers, `_`, and `-`.
+If `API_SECRET` is missing or shorter than 32 characters, `/api/users` and `/api/broadcast` remain disabled. Never commit `.env` or paste live bot tokens into logs or issues.
 
 ### Local Development
 
@@ -48,10 +52,10 @@ pip install -r requirements.txt
 3. Set up environment variables (create `.env` file):
 ```bash
 TELEGRAM_BOT_TOKEN=your_token
-API_SECRET=any_random_string
-WEBHOOK_URL=http://localhost:8080
 PORT=8080
 ```
+
+Local mode uses long polling, so it does not need `WEBHOOK_URL` or `TELEGRAM_WEBHOOK_SECRET`. `API_SECRET` is optional locally; without it, the admin API endpoints stay disabled.
 
 4. Run locally:
 ```bash
@@ -65,9 +69,10 @@ docker build -t svitlo-bot .
 docker run -d \
   -e TELEGRAM_BOT_TOKEN=your_token \
   -e API_SECRET=your_secret \
+  -e TELEGRAM_WEBHOOK_SECRET=your_webhook_secret \
   -e WEBHOOK_URL=https://your-domain.com \
   -e PORT=8080 \
-  -v ./data:/data \
+  -v svitlo_data:/data \
   -p 8080:8080 \
   svitlo-bot
 ```
@@ -94,6 +99,7 @@ docker run -d \
 - **scraper.py** - Schedule fetcher and JSON normalizer for OE_OUTAGE_DATA
 - **SQLite DB** - User subscriptions and schedule cache
 - **Flask** - Webhook receiver and API endpoints
+- **Waitress** - Production WSGI server
 
 ## Built with
 

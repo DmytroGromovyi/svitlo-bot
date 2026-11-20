@@ -1,4 +1,11 @@
 # flyctl launch added from .gitignore
+.git
+.env
+.env.*
+venv
+.venv-local
+data/users.db
+data/schedules.json
 # Python
 **\__pycache__
 **\*.py[cod]
