@@ -219,7 +219,7 @@ def get_schedule(city, group_number):
     )
     return {'today': result[0], 'tomorrow': result[1], 'updated_at': result[2]} if result else None
 
-def save_schedule(city, group_number, today, tomorrow, schedule_hash):
+def save_schedule(city, group_number, today, tomorrow, schedule_hash, reference_date):
     curr = db_execute(
         'SELECT today_schedule, tomorrow_schedule FROM schedules WHERE city = ? AND group_number = ?', 
         (city, group_number), fetch_one=True
@@ -236,7 +236,7 @@ def save_schedule(city, group_number, today, tomorrow, schedule_hash):
             schedule_hash = excluded.schedule_hash,
             reference_date = excluded.reference_date,
             updated_at = CURRENT_TIMESTAMP
-    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash, None))
+    ''', (city, group_number, today, tomorrow, prev_today, prev_tomorrow, schedule_hash, reference_date))
 
 def get_schedule_hash(city, group_number):
     result = db_execute(
@@ -495,12 +495,14 @@ async def check_and_notify():
                 old_hash = old_data['hash'] if old_data else None
                 old_reference_date = old_data['reference_date'] if old_data else None
                 
-                save_schedule(city_id, group, parsed_today or '', parsed_tomorrow or '', new_hash)
+                save_schedule(city_id, group, parsed_today or '', parsed_tomorrow or '', new_hash, today_date)
                 saved_count += 1
                 logger.info(f"Saved schedule for {city_id} group {group}")
                 
                 # Only notify if hash changed AND dates match (not midnight boundary issue)
-                date_changed = old_reference_date != today_date
+                # Treat a missing/old reference date as a baseline refresh. This
+                # avoids notifications caused only by the midnight date rollover.
+                date_changed = old_data is None or old_reference_date != today_date
                 hash_changed = new_hash != old_hash
                 
                 if hash_changed and not date_changed:  # Hash changed but same reference date
