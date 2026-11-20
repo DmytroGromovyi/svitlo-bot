@@ -19,7 +19,7 @@ Svitlo Bot fetches pre-structured outage schedule JSON from the [OE_OUTAGE_DATA 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.10+
 - Telegram Bot Token (get it from [@BotFather](https://t.me/botfather))
 - A server or hosting platform with webhook support
 
@@ -79,6 +79,7 @@ docker run -d \
 - `/schedule` - View current schedule
 - `/mygroup` - Check your selected group
 - `/stop` - Unsubscribe from notifications
+- `/testupdate` - Send two simulated schedule updates: tomorrow's schedule and no outages (local mode only; does not modify the database)
 
 ## API Endpoints
 
@@ -89,6 +90,7 @@ docker run -d \
 ## Architecture
 
 - **bot.py** - Main bot logic, Telegram handlers, notification system
+- **schedule_card.py** - SVG schedule card rendering for Telegram photo messages
 - **scraper.py** - Schedule fetcher and JSON normalizer for OE_OUTAGE_DATA
 - **SQLite DB** - User subscriptions and schedule cache
 - **Flask** - Webhook receiver and API endpoints
