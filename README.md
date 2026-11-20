@@ -77,6 +77,8 @@ docker run -d \
   svitlo-bot
 ```
 
+The container fixes ownership of `/data` at startup, then runs the bot as an unprivileged user so SQLite can write its database and journal safely.
+
 ## Bot Commands
 
 - `/start` - Start the bot

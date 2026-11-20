@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Include a Unicode font for Ukrainian labels in the generated SVG schedule cards.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies
@@ -15,12 +15,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py .
 COPY scraper.py .
 COPY schedule_card.py .
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
-# Create writable data paths and drop root privileges for runtime.
-RUN mkdir -p data /data && chown -R 10001:10001 /app /data
+# Prepare writable paths. The entrypoint fixes ownership of the mounted Fly
+# volume at runtime, then drops privileges before starting the application.
+RUN groupadd --system --gid 10001 bot \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin bot \
+    && mkdir -p data /data \
+    && chown -R 10001:10001 /app /data \
+    && chmod 755 /usr/local/bin/docker-entrypoint
 
-# Fly.io assigns the mounted volume to the image's configured user.
-USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
 
-# Run bot
 CMD ["python", "bot.py"]

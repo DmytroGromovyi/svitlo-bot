@@ -43,5 +43,15 @@ export LOCAL_MODE=1
 export DB_PATH="${DB_PATH:-$(pwd)/data/users.db}"
 
 "$VENV_PYTHON" -m pip install -q -r requirements.txt
-echo "Starting local bot and web server on http://127.0.0.1:${PORT:-8080}"
+
+requested_port="${PORT:-8080}"
+if ! "$VENV_PYTHON" -c 'import socket,sys;s=socket.socket();s.bind(("127.0.0.1",int(sys.argv[1])));s.close()' "$requested_port" >/dev/null 2>&1; then
+  PORT="$("$VENV_PYTHON" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  echo "Port $requested_port is unavailable; using $PORT instead."
+else
+  PORT="$requested_port"
+fi
+export PORT
+
+echo "Starting local bot and web server on http://127.0.0.1:$PORT"
 exec "$VENV_PYTHON" bot.py
